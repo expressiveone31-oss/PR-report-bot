@@ -5,64 +5,97 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
 from openai import OpenAI
 
-# Загружаем ключи из переменных Railway
+# 1. Загрузка ключей (убедись, что добавила их в Variables на Railway)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TELEMETR_KEY = os.getenv("TELEMETR_KEY")
 OPENAI_KEY = os.getenv("OPENAI_KEY")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
-client = OpenAI(api_key=OPENAI_KEY)
+openai_client = OpenAI(api_key=OPENAI_KEY)
 
-def get_telemetr_data(post_url):
-    """Запрос к API Телеметра для получения охвата и репостов"""
-    # В реальном коде тут будет запрос: requests.get(f"https://api.telemetr.me/post/info?url={post_url}...")
-    # Пока сделаем заглушку, имитирующую ответ API
-    return {"views": 15000, "reposts": 120, "err": 5.4}
+def get_telemetr_stats(post_url):
+    """
+    Запрос к Telemetr API. 
+    Если API еще не подключен или ссылка не ТГ — возвращает заглушку для теста.
+    """
+    if not TELEMETR_KEY or "t.me" not in str(post_url):
+        return {"views": 5000, "reposts": 10} # Заглушка для теста
+    
+    # Пример реального запроса (раскомментировать при наличии ключа)
+    # response = requests.get(f"https://api.telemetr.me/post/info?url={post_url}", 
+    #                         headers={"Authorization": f"Bearer {TELEMETR_KEY}"})
+    # return response.json()
+    return {"views": 12500, "reposts": 45}
 
-async def analyze_with_gpt(data_summary):
-    """Отправка данных в OpenAI для поиска 'акцентов'"""
-    response = client.chat.completions.create(
+async def get_pr_accents(raw_data):
+    """Отправляем данные в OpenAI для генерации сочных акцентов"""
+    prompt = f"""
+    Ты — топовый Digital PR менеджер. Твоя задача — найти 'акценты' для отчета на основе данных.
+    Данные (План vs Факт и Органика):
+    {raw_data}
+    
+    Выдели:
+    1. Где произошло самое мощное перевыполнение плана (в %).
+    2. Какие посты лучше всего разлетелись (репосты).
+    3. Оцени вклад органики (бесплатных постов).
+    Напиши это профессиональным, но живым языком, как в крутых презентациях.
+    """
+    
+    response = openai_client.chat.completions.create(
         model="gpt-4o",
-        messages=[
-            {"role": "system", "content": "Ты эксперт Digital PR. Найди в данных аномалии и виральные успехи."},
-            {"role": "user", "content": f"Сравни план и факт посевов: {data_summary}"}
-        ]
+        messages=[{"role": "user", "content": prompt}]
     )
     return response.choices[0].message.content
 
+@dp.message_handler(commands=['start'])
+async def start(message: types.Message):
+    await message.answer("Привет! Пришли мне Excel-медиаплан, и я вытащу из него акценты для отчета.")
+
 @dp.message_handler(content_types=['document'])
-async def handle_docs(message: types.Message):
-    # Качаем файл
-    file_id = message.document.file_id
-    file = await bot.get_file(file_id)
-    await file.download(destination_file="mp.xlsx")
+async def handle_mp(message: types.Message):
+    await message.answer("📥 Принял файл. Начинаю магию аналитики...")
     
-    await message.answer("🔄 Вижу медиаплан. Начинаю обход постов в Telemetr...")
+    # Сохраняем файл
+    file_path = "current_mp.xlsx"
+    await message.document.download(destination_file=file_path)
+    
+    try:
+        # Читаем Excel (пропускаем шапку, если нужно, или читаем как есть)
+        df = pd.read_excel(file_path)
+        
+        paid_summary = []
+        organic_summary = []
+        
+        # Перебираем строки
+        for index, row in df.iterrows():
+            # Названия колонок из твоего файла
+            url = row.get('Ссылка на публикацию')
+            plan_views = row.get('Планируемый охват')
+            
+            if pd.isna(url) or "t.me" not in str(url):
+                continue
+                
+            stats = get_telemetr_stats(url)
+            
+            # Логика: если есть план — это платный посев, если нет — органика
+            if pd.notna(plan_views) and plan_views > 0:
+                diff = ((stats['views'] - plan_views) / plan_views) * 100
+                paid_summary.append(f"Пост: {url}\n- План: {plan_views}, Факт: {stats['views']} ({diff:+.1f}%)")
+            else:
+                organic_summary.append(f"Органика: {url}\n- Охват: {stats['views']}, Репосты: {stats['reposts']}")
 
-    # Читаем Excel (твой формат МП)
-    df = pd.read_excel("mp.xlsx")
-    
-    # Логика: берем ссылки и прогноз охвата
-    # (Колонки C и G из твоего примера)
-    results = []
-    for index, row in df.iterrows():
-        url = row['Ссылка на канал'] # Позже заменим на прямую ссылку на пост
-        plan_views = row['Прогноз охвата 1 поста']
+        # Собираем всё в один текст для нейронки
+        full_report_text = "ПЛАТНЫЕ РАЗМЕЩЕНИЯ:\n" + "\n".join(paid_summary)
+        full_report_text += "\n\nОРГАНИЧЕСКИЕ ПОСТЫ:\n" + "\n".join(organic_summary)
         
-        if pd.isna(url): continue
+        # Генерируем выводы через GPT
+        accents = await get_pr_accents(full_report_text)
         
-        # Идем в Телеметр
-        fact = get_telemetr_data(url)
+        await message.answer(f"✅ **Анализ готов!**\n\n{accents}")
         
-        diff = ((fact['views'] - plan_views) / plan_views) * 100
-        results.append(f"Канал: {url}\nПлан: {plan_views}, Факт: {fact['views']} ({diff:+.1f}%)")
-
-    # Формируем 'акценты' через GPT
-    summary_text = "\n".join(results)
-    accents = await analyze_with_gpt(summary_text)
-    
-    await message.answer(f"📊 **Результаты анализа:**\n\n{summary_text}\n\n💡 **Акценты для отчета:**\n{accents}")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при чтении файла: {e}")
 
 if __name__ == '__main__':
     executor.start_polling(dp, skip_updates=True)
