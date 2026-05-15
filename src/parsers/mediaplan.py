@@ -70,6 +70,25 @@ def _detect_platform(url: str) -> str:
     return "unknown"
 
 
+def _pick_best_url(raw: str) -> str:
+    """
+    Из ячейки с несколькими ссылками (разделены переносом строки, пробелом или ;)
+    выбирает одну — предпочтительно wall-пост, а не clip/video.
+    """
+    # Разбиваем по любому разделителю
+    candidates = [u.strip() for u in re.split(r'[\n\r;]+', raw) if u.strip().startswith('http')]
+    if not candidates:
+        return raw.strip()
+    if len(candidates) == 1:
+        return candidates[0]
+    # Предпочитаем wall-ссылки (пост) над clip/video
+    wall = [u for u in candidates if 'wall' in u]
+    if wall:
+        return wall[0]
+    # Иначе берём первую
+    return candidates[0]
+
+
 def _parse_number(value: str) -> Optional[float]:
     """Убирает пробелы, символы валюты и возвращает float."""
     if not value:
@@ -139,7 +158,7 @@ def parse_csv(content: str) -> MediaPlan:
                 return ""
 
             channel_url = get("Ссылка")
-            post_url = get("Ссылка на публикацию")
+            post_url = _pick_best_url(get("Ссылка на публикацию"))
             platform = _detect_platform(post_url or channel_url)
 
             post = Post(

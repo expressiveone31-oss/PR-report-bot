@@ -15,15 +15,23 @@ SYSTEM_PROMPT = """Ты — аналитик команды Digital PR аген�
 
 Выведи ровно эти 4 пункта в указанном порядке, используя данные из поля "ОБЩИЕ ЦИФРЫ КАМПАНИИ":
 
+ЕСЛИ ПЛАН ВЫПОЛНЕН (факт ≥ план):
 • Вместо {план} просмотров у нас {факт} просмотров! Это в {факт/план} раз выше планируемого охвата!
 • Итоговый CPV по проекту: {факт_cpv} ₽ при плановом {план_cpv} ₽ — в {план_cpv/факт_cpv} раза ниже
 • Виральный охват по проекту составил {факт−план} просмотров (фактический минус плановый), что эквивалентно экономии {(факт−план)/2} рублей (при средней цене просмотра по рекламному рынку в 2 рубля)
 • Суммарный органический охват — {органика} просмотров
 
+ЕСЛИ ПЛАН НЕ ВЫПОЛНЕН (факт < план):
+• Фактический охват составил {факт} просмотров при плане {план} — выполнение плана на {факт/план×100}%
+• Итоговый CPV по проекту: {факт_cpv} ₽ при плановом {план_cpv} ₽ — в {факт_cpv/план_cpv} раза выше плана
+• Суммарный органический охват — {органика} просмотров
+(третий пункт про экономию НЕ пишем — план не выполнен)
+
 Правила:
 - Множители округляй до одного знака после запятой
 - Цифры разделяй запятыми: 6,170,892
 - НЕ добавляй другие пункты в этот раздел
+- НИКОГДА не пиши отрицательные числа в виральном охвате или экономии
 
 СВЕРХРЕЗУЛЬТАТЫ
 
@@ -205,6 +213,8 @@ async def analyze_campaign(
     actual_cpv = placement_budget / total_actual_reach if total_actual_reach > 0 else 0
     planned_cpv = placement_budget / total_planned_reach if total_planned_reach > 0 else 0
     cpv_ratio = planned_cpv / actual_cpv if actual_cpv > 0 else 0
+    reach_ratio = total_actual_reach / total_planned_reach if total_planned_reach > 0 else 0
+    plan_exceeded = total_actual_reach >= total_planned_reach  # выполнен ли план
 
     # --- Предварительный расчёт кандидатов для раздела 2 ---
     # Делаем это в Python, чтобы GPT не мог пропустить ни одного кандидата
@@ -273,18 +283,20 @@ async def analyze_campaign(
     superresults.sort(key=lambda x: x[0], reverse=True)
     superresults_text = "\n".join(line for _, line in superresults[:5])
 
+    viral_reach = total_actual_reach - total_planned_reach
     user_message = f"""Проект: {project_name}
 
 ОБЩИЕ ЦИФРЫ КАМПАНИИ:
 - Плановый охват: {total_planned_reach:,}
 - Фактический охват (все публикации): {total_actual_reach:,}
-- Множитель перевыполнения: в {total_actual_reach / total_planned_reach:.1f} раза
+- План {"ВЫПОЛНЕН" if plan_exceeded else "НЕ ВЫПОЛНЕН"}: факт {"≥" if plan_exceeded else "<"} плана
+- Множитель {"перевыполнения" if plan_exceeded else "выполнения"}: {reach_ratio:.1f}x
 - Бюджет размещений: {placement_budget:,.0f} ₽
 - Факт CPV: {actual_cpv:.2f} ₽
 - Плановый CPV: {planned_cpv:.2f} ₽
-- CPV ниже плана в: {cpv_ratio:.1f} раза
-- Виральный охват (факт − план): {total_actual_reach - total_planned_reach:,} просмотров
-- Расчётная экономия: {total_savings:,.0f} ₽
+- CPV {"ниже" if actual_cpv <= planned_cpv else "выше"} плана в: {max(cpv_ratio, 1/cpv_ratio if cpv_ratio > 0 else 0):.1f} раза
+- Виральный охват (факт − план): {viral_reach:,} просмотров {"(положительный — план перевыполнен)" if viral_reach >= 0 else "(отрицательный — план НЕ выполнен, не упоминай экономию)"}
+- Расчётная экономия: {total_savings:,.0f} ₽ {"(только если виральный охват положительный)" if viral_reach >= 0 else "(не указывай — план не выполнен)"}
 - Органический охват: {total_organic_reach:,} просмотров
 
 ПУБЛИКАЦИИ:

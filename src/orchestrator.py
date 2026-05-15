@@ -174,11 +174,11 @@ async def process_mediaplan(mp: MediaPlan, project_name: str = "") -> str:
         project_name=project_name or "Без названия",
         posts_data=list(posts_data),
         total_planned_reach=mp.total_planned_reach,
-        total_actual_reach=total_actual,
+        total_actual_reach=mp_total,       # итог из МП — зафиксированные цифры команды
         total_budget=mp.total_budget,
         total_savings=total_savings,
         total_organic_reach=total_organic_reach,
-        total_placement_budget=mp.total_budget,  # только стоимость размещений, без менеджмента
+        total_placement_budget=mp.total_budget,
     )
 
     return result
