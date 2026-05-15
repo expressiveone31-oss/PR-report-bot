@@ -1,0 +1,220 @@
+"""
+Парсер CSV медиаплана.
+
+Ожидаемые колонки (paid-блок):
+  Название, Ссылка, Планируемый охват, Общая стоимость с АК 15%,
+  Планируемый CPV, Площадка, Дата, Ссылка на публикацию,
+  Охват (факт), Факт CPV, Скрины публикации
+
+Органика живёт в правой части таблицы — колонка со ссылками
+и следующая за ней с охватом.
+"""
+
+import csv
+import re
+import io
+from dataclasses import dataclass, field
+from typing import Optional
+
+
+@dataclass
+class Post:
+    name: str
+    channel_url: str
+    platform: str                     # vk | telegram | instagram | twitter
+    post_url: str
+    planned_reach: int = 0
+    actual_reach: Optional[int] = None
+    cost: Optional[float] = None
+    planned_cpv: Optional[float] = None
+    actual_cpv: Optional[float] = None
+    is_organic: bool = False
+    date: Optional[str] = None
+
+
+@dataclass
+class MediaPlan:
+    project_name: str = ""
+    paid_posts: list[Post] = field(default_factory=list)
+    organic_posts: list[Post] = field(default_factory=list)
+    mp_total_actual_reach: Optional[int] = None  # итог из строки "Итого с органикой" в МП
+
+    @property
+    def total_planned_reach(self) -> int:
+        return sum(p.planned_reach for p in self.paid_posts)
+
+    @property
+    def total_actual_reach(self) -> int:
+        # Приоритет — зафиксированный итог из МП, иначе сумма постов
+        if self.mp_total_actual_reach:
+            return self.mp_total_actual_reach
+        return sum(p.actual_reach or 0 for p in self.paid_posts + self.organic_posts)
+
+    @property
+    def total_budget(self) -> float:
+        return sum(p.cost or 0 for p in self.paid_posts)
+
+
+def _detect_platform(url: str) -> str:
+    url = url.lower()
+    if "vk.com" in url or "vk.ru" in url:
+        return "vk"
+    if "t.me" in url or "telegram" in url:
+        return "telegram"
+    if "instagram.com" in url:
+        return "instagram"
+    if "x.com" in url or "twitter.com" in url:
+        return "twitter"
+    if "threads.com" in url or "threads.net" in url:
+        return "threads"
+    return "unknown"
+
+
+def _parse_number(value: str) -> Optional[float]:
+    """Убирает пробелы, символы валюты и возвращает float."""
+    if not value:
+        return None
+    cleaned = re.sub(r"[^\d,\.]", "", value.strip()).replace(",", ".")
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _parse_int(value: str) -> int:
+    result = _parse_number(value)
+    return int(result) if result is not None else 0
+
+
+def parse_csv(content: str) -> MediaPlan:
+    """
+    Принимает текст CSV и возвращает объект MediaPlan.
+    Работает с форматом МП «Настя прости меня» и аналогичными.
+    """
+    mp = MediaPlan()
+    reader = csv.reader(io.StringIO(content))
+    rows = list(reader)
+
+    # --- Ищем итоговый охват из строки "Итого с органикой" ---
+    for row in rows:
+        if not row:
+            continue
+        for col_idx, cell in enumerate(row):
+            if "итого с органикой" in cell.strip().lower():
+                # Ищем число в этой же строке правее триггера
+                for next_cell in row[col_idx + 1:]:
+                    val = _parse_number(next_cell.strip())
+                    if val and val > 1000:
+                        mp.mp_total_actual_reach = int(val)
+                        break
+                break
+
+    # --- Paid-блок ---
+    # Ищем строку-заголовок: первая строка, где есть "Название" или "Площадка"
+    header_idx = None
+    for i, row in enumerate(rows):
+        if row and any(cell.strip() in ("Название", "Площадка") for cell in row):
+            header_idx = i
+            break
+
+    if header_idx is not None:
+        headers = [h.strip() for h in rows[header_idx]]
+        col = {h: idx for idx, h in enumerate(headers) if h}
+
+        for row in rows[header_idx + 1:]:
+            if not row or not row[0].strip():
+                continue
+            name = row[0].strip()
+            # Стоп-строки: итого и пустые блоки
+            if name.lower().startswith("итого") or name.lower().startswith("общий"):
+                continue
+            # Если строка явно из блока стоимостей проекта — пропускаем
+            if any(kw in name for kw in ("Стоимость", "Копирайт", "Account", "Junior", "Прогноз", "Факт", "Сумма", "Менеджер")):
+                continue
+
+            def get(key: str) -> str:
+                idx = col.get(key)
+                if idx is not None and idx < len(row):
+                    return row[idx].strip()
+                return ""
+
+            channel_url = get("Ссылка")
+            post_url = get("Ссылка на публикацию")
+            platform = _detect_platform(post_url or channel_url)
+
+            post = Post(
+                name=name,
+                channel_url=channel_url,
+                platform=platform,
+                post_url=post_url,
+                planned_reach=_parse_int(get("Планируемый охват")),
+                actual_reach=int(_parse_number(get("Охват (факт)")) or 0) or None,
+                cost=_parse_number(get("Общая стоимость с АК 15%")),
+                planned_cpv=_parse_number(get("Планируемый CPV")),
+                actual_cpv=_parse_number(get("Факт CPV")),
+                date=get("Дата"),
+                is_organic=False,
+            )
+            if post.post_url or post.channel_url:
+                mp.paid_posts.append(post)
+
+    # --- Органика ---
+    # Ищем триггер «органически» в любой ячейке любой строки.
+    # После триггера сканируем все ячейки каждой строки в поисках http-ссылок.
+    # Охват берём из следующей непустой ячейки после ссылки.
+    organic_started = False
+    seen_urls: set[str] = set()
+
+    for row in rows:
+        if not row:
+            continue
+
+        # Триггер начала органики — несколько вариантов оформления
+        if any("органик" in str(cell).lower() for cell in row):
+            organic_started = True
+            continue
+
+        if not organic_started:
+            continue
+
+        # Ищем http-ссылки в любой ячейке строки
+        for col_idx, cell in enumerate(row):
+            cell = cell.strip()
+            if not cell.startswith("http"):
+                continue
+
+            # Пропускаем ссылки на скриншоты и новостные статьи (не соцсети)
+            SOCIAL_DOMAINS = ("vk.com", "vk.ru", "t.me", "instagram.com", "x.com", "twitter.com", "threads.com")
+            if not any(domain in cell for domain in SOCIAL_DOMAINS):
+                continue
+            if any(skip in cell for skip in ("disk.yandex", "yandex.ru/i/", "yandex.ru/d/")):
+                continue
+
+            # Это органическая ссылка — берём охват из следующей ячейки
+            reach = 0
+            for next_cell in row[col_idx + 1:]:
+                next_cell = next_cell.strip()
+                if next_cell and not next_cell.startswith("http"):
+                    parsed = _parse_number(next_cell)
+                    if parsed is not None:
+                        reach = int(parsed)
+                    break
+
+            # Дедупликация
+            if cell in seen_urls:
+                continue
+            seen_urls.add(cell)
+
+            platform = _detect_platform(cell)
+            post = Post(
+                name=cell,
+                channel_url=cell,
+                platform=platform,
+                post_url=cell,
+                planned_reach=0,
+                actual_reach=reach if reach else None,
+                is_organic=True,
+            )
+            mp.organic_posts.append(post)
+
+    return mp
