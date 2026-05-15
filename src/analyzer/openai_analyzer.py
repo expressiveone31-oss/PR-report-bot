@@ -28,7 +28,8 @@ SYSTEM_PROMPT = """Ты — аналитик команды Digital PR аген�
 (третий пункт про экономию НЕ пишем — план не выполнен)
 
 Правила:
-- Множители округляй до одного знака после запятой
+- Множители округляй до одного знака после запятой, используй ЗАПЯТУЮ как десятичный разделитель: «в 22,4 раза», НЕ «в 22.4 раз»
+- Склонение: 1,0 → «раз», 1,1–1,4 → «раза», 1,5–1,9 → «раза», 2,0+ → «раза» (всегда «раза» кроме ровно 1)
 - Цифры разделяй запятыми: 6,170,892
 - НЕ добавляй другие пункты в этот раздел
 - НИКОГДА не пиши отрицательные числа в виральном охвате или экономии
@@ -217,71 +218,96 @@ async def analyze_campaign(
     plan_exceeded = total_actual_reach >= total_planned_reach  # выполнен ли план
 
     # --- Предварительный расчёт кандидатов для раздела 2 ---
-    # Делаем это в Python, чтобы GPT не мог пропустить ни одного кандидата
-    superresults = []
+    # Группируем по URL: один пост — одна строка с перечислением всех превышений.
+    # Делаем это в Python, чтобы GPT не мог пропустить ни одного кандидата.
+
+    def _fmt_ratio(r: float) -> str:
+        """Форматирует множитель: запятая как десятичный разделитель, склонение «раза»."""
+        s = f"{r:.1f}".replace(".", ",")
+        return f"в {s} раза"
+
+    # post_url → {"max_ratio": float, "parts": [str], "views_ratio": float}
+    post_hits: dict[str, dict] = {}
 
     for post in posts_data:
         if post.get("is_organic"):
             continue
         url = post.get("post_url", "")
-        name = post.get("name", url)
         stats = post.get("stats", {})
         plan = post.get("planned_reach") or 0
         avg = stats.get("channel_avg") or {}
         n_posts = avg.get("posts_analyzed", 20)
 
+        if url not in post_hits:
+            post_hits[url] = {"max_ratio": 0.0, "parts": [], "views_ratio": 0.0}
+
+        entry = post_hits[url]
+
         # Критерий А — просмотры ≥ 2× план
         views = stats.get("views")
         if views and plan and views >= 2 * plan:
             ratio = views / plan
-            superresults.append((ratio, f"Пост {url} — {views:,} просмотров при плане {plan:,} (в {ratio:.1f} раз выше плана)"))
+            entry["parts"].insert(0, f"{views:,} просмотров при плане {plan:,} ({_fmt_ratio(ratio)} выше плана)")
+            entry["views_ratio"] = ratio
+            entry["max_ratio"] = max(entry["max_ratio"], ratio)
 
         # Критерий Б — лайки ≥ 1.5× норма
         likes = stats.get("likes")
         avg_likes = avg.get("avg_likes")
         if likes is not None and avg_likes and likes >= 1.5 * avg_likes:
             ratio = likes / avg_likes
-            superresults.append((ratio, f"Пост {url} — {likes:,} лайков вместо средних {avg_likes:,} (среднее по последним {n_posts} постам канала)"))
+            entry["parts"].append(f"{likes:,} лайков вместо средних {avg_likes:,} (среднее по {n_posts} постам канала)")
+            entry["max_ratio"] = max(entry["max_ratio"], ratio)
 
         # Критерий Б — комментарии ≥ 1.5× норма
         comments = stats.get("comments")
         avg_comments = avg.get("avg_comments")
         if comments is not None and avg_comments and comments >= 1.5 * avg_comments:
             ratio = comments / avg_comments
-            superresults.append((ratio, f"Пост {url} — {comments:,} комментариев вместо средних {avg_comments:,} (среднее по последним {n_posts} постам канала)"))
+            entry["parts"].append(f"{comments:,} комментариев вместо средних {avg_comments:,} (среднее по {n_posts} постам канала)")
+            entry["max_ratio"] = max(entry["max_ratio"], ratio)
 
-        # Критерий Б — репосты ≥ 1.5× норма
+        # Критерий Б — репосты/форварды ≥ 1.5× норма
         reposts = stats.get("reposts") or stats.get("forwards")
         avg_reposts = avg.get("avg_reposts") or avg.get("avg_forwards")
         if reposts is not None and avg_reposts and reposts >= 1.5 * avg_reposts:
             ratio = reposts / avg_reposts
-            superresults.append((ratio, f"Пост {url} — {reposts:,} репостов вместо средних {avg_reposts:,} (среднее по последним {n_posts} постам канала)"))
+            label = "пересылок" if stats.get("forwards") else "репостов"
+            entry["parts"].append(f"{reposts:,} {label} вместо средних {avg_reposts:,} (среднее по {n_posts} постам канала)")
+            entry["max_ratio"] = max(entry["max_ratio"], ratio)
 
         # Критерий Б — реакции ≥ 1.5× норма
         reactions = stats.get("reactions_count")
         avg_reactions = avg.get("avg_reactions")
         if reactions is not None and avg_reactions and reactions >= 1.5 * avg_reactions:
             ratio = reactions / avg_reactions
-            superresults.append((ratio, f"Пост {url} — {reactions:,} реакций вместо средних {avg_reactions:,} (среднее по последним {n_posts} постам канала)"))
+            entry["parts"].append(f"{reactions:,} реакций вместо средних {avg_reactions:,} (среднее по {n_posts} постам канала)")
+            entry["max_ratio"] = max(entry["max_ratio"], ratio)
 
-    # Если ничего нет — fallback: берём с ×1.1
-    if not superresults:
+    # Оставляем только посты с хотя бы одним превышением
+    candidates = [(d["max_ratio"], url, d["parts"]) for url, d in post_hits.items() if d["parts"]]
+
+    # Если ничего нет — fallback: просмотры ×1.1–1.99 (умеренное превышение)
+    if not candidates:
         for post in posts_data:
             if post.get("is_organic"):
                 continue
             url = post.get("post_url", "")
             stats = post.get("stats", {})
             plan = post.get("planned_reach") or 0
-            avg = stats.get("channel_avg") or {}
-            n_posts = avg.get("posts_analyzed", 20)
             views = stats.get("views")
             if views and plan and views >= 1.1 * plan:
                 ratio = views / plan
-                superresults.append((ratio, f"Пост {url} — {views:,} просмотров при плане {plan:,} (в {ratio:.1f} раз выше плана) (умеренное превышение)"))
+                candidates.append((ratio, url, [
+                    f"{views:,} просмотров при плане {plan:,} ({_fmt_ratio(ratio)} выше плана) (умеренное превышение)"
+                ]))
 
-    # Топ-5 по множителю
-    superresults.sort(key=lambda x: x[0], reverse=True)
-    superresults_text = "\n".join(line for _, line in superresults[:5])
+    # Топ-5 по максимальному множителю
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    superresults_lines = []
+    for _, url, parts in candidates[:5]:
+        superresults_lines.append(f"Пост {url} — " + "; ".join(parts))
+    superresults_text = "\n".join(superresults_lines)
 
     viral_reach = total_actual_reach - total_planned_reach
     user_message = f"""Проект: {project_name}

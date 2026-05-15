@@ -25,6 +25,9 @@ async def _fetch_stats_for_post(post: Post) -> dict:
         if post.platform == "vk" and post.post_url:
             logger.info(f"VK: fetching {post.post_url}")
             result = await vk.get_post_stats(post.post_url)
+            # Подставляем название группы из API если name — это ссылка
+            if result.channel_title and post.name.startswith("http"):
+                post.name = result.channel_title
             stats = {
                 "views": result.views,
                 "likes": result.likes,
@@ -41,11 +44,14 @@ async def _fetch_stats_for_post(post: Post) -> dict:
                     "avg_comments": result.channel_avg.avg_comments,
                     "posts_analyzed": result.channel_avg.posts_analyzed,
                 }
-            logger.info(f"VK done: views={result.views}, avg_views={result.channel_avg.avg_views if result.channel_avg else None}, error={result.error}")
+            logger.info(f"VK done: views={result.views}, channel_title={result.channel_title}, avg_views={result.channel_avg.avg_views if result.channel_avg else None}, error={result.error}")
 
         elif post.platform == "telegram" and post.post_url:
             logger.info(f"Telemetr: fetching {post.post_url}")
             result = await telemetr.get_post_stats(post.post_url)
+            # Подставляем название канала из API если name — это ссылка
+            if result.channel_title and post.name.startswith("http"):
+                post.name = result.channel_title
             stats = {
                 "views": result.views,
                 "forwards": result.forwards,
@@ -62,7 +68,7 @@ async def _fetch_stats_for_post(post: Post) -> dict:
                     "avg_comments": result.channel_avg.avg_comments,
                     "posts_analyzed": result.channel_avg.posts_analyzed,
                 }
-            logger.info(f"Telemetr done: views={result.views}, avg_views={result.channel_avg.avg_views if result.channel_avg else None}, error={result.error}")
+            logger.info(f"Telemetr done: views={result.views}, channel_title={result.channel_title}, avg_views={result.channel_avg.avg_views if result.channel_avg else None}, error={result.error}")
 
             # Если есть комментарии и Pyrogram авторизован — парсим тексты
             # Минимальный порог: 5+ комментариев, иначе не стоит парсить

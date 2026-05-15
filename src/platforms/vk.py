@@ -36,6 +36,7 @@ class VKPostStats:
     likes: Optional[int] = None
     reposts: Optional[int] = None
     comments: Optional[int] = None
+    channel_title: Optional[str] = None
     top_comments: list[str] = field(default_factory=list)
     channel_avg: Optional[ChannelAverage] = None
     error: Optional[str] = None
@@ -158,6 +159,22 @@ async def get_post_stats(post_url: str) -> VKPostStats:
         # Средние показатели канала
         channel_avg = await _get_channel_average(session, owner_id, post_id)
 
+        # Название группы/паблика (owner_id отрицательный = группа)
+        channel_title = None
+        if owner_id < 0:
+            group_params = {
+                "group_ids": str(-owner_id),
+                "fields": "name",
+                "access_token": VK_ACCESS_TOKEN,
+                "v": VK_API_VERSION,
+            }
+            async with session.get(f"{VK_API_BASE}/groups.getById",
+                                   params=group_params) as resp:
+                group_data = await resp.json()
+            groups = group_data.get("response", {}).get("groups") or group_data.get("response", [])
+            if groups:
+                channel_title = groups[0].get("name")
+
     return VKPostStats(
         post_url=post_url,
         owner_id=owner_id,
@@ -166,6 +183,7 @@ async def get_post_stats(post_url: str) -> VKPostStats:
         likes=likes,
         reposts=reposts,
         comments=comments_count,
+        channel_title=channel_title,
         top_comments=top_comments,
         channel_avg=channel_avg,
     )
