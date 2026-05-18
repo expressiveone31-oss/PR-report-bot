@@ -292,7 +292,8 @@ async def got_project_name(message: Message, state: FSMContext) -> None:
     ]
     for item in diagnostics["api_breakdown"]:
         err = f" — ошибка: {item['error']}" if item.get("error") else ""
-        api_lines.append(f"• {item['views']:,} — {item['url']}{err}")
+        source = f" [{item['source']}]" if item.get("source") else ""
+        api_lines.append(f"• {item['views']:,}{source} — {item['url']}{err}")
 
     errored_posts = [item for item in diagnostics["api_breakdown"] if item.get("error")]
     if errored_posts:
