@@ -267,7 +267,7 @@ async def got_project_name(message: Message, state: FSMContext) -> None:
     )
 
     try:
-        result, total_actual = await process_links(
+        result, paid_actual, diagnostics = await process_links(
             paid_links=paid_links,
             organic_links=organic_links,
             organic_reach_manual=organic_reach_manual,
@@ -283,13 +283,27 @@ async def got_project_name(message: Message, state: FSMContext) -> None:
         )
         return
 
-    # Сначала показываем собранный охват
-    await message.answer(
-        f"Фактический охват по данным API: {total_actual:,}\n\n"
-        f"Если цифра не совпадает с вашими данными — это нормально: "
-        f"просмотры продолжают расти после публикации.",
-        parse_mode=None,
-    )
+    # Сначала показываем собранный охват и разбивку — это помогает ловить API-недобор по конкретным постам.
+    api_lines = [
+        f"Paid-охват по данным API: {paid_actual:,}",
+        f"Органика отдельной строкой: {diagnostics['organic_actual']:,}",
+        f"Итого с органикой: {diagnostics['total_with_organic']:,}",
+        "",
+        "Разбивка paid по постам:",
+    ]
+    for item in diagnostics["api_breakdown"]:
+        err = f" — ошибка: {item['error']}" if item.get("error") else ""
+        api_lines.append(f"• {item['views']:,} — {item['url']}{err}")
+
+    errored_posts = [item for item in diagnostics["api_breakdown"] if item.get("error")]
+    if errored_posts:
+        api_lines.extend([
+            "",
+            "Внимание: по части paid-постов API вернул ошибку, поэтому сумма paid может быть неполной.",
+            "Проверь строки с ошибками выше перед тем, как использовать отчёт для клиента.",
+        ])
+
+    await message.answer("\n".join(api_lines), parse_mode=None)
 
     # Затем акценты — отправляем без Markdown чтобы избежать ошибок парсинга
     for chunk in send_long(result):
