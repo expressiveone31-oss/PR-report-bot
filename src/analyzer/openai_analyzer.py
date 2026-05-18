@@ -13,26 +13,9 @@ SYSTEM_PROMPT = """Ты — аналитик команды Digital PR аген�
 
 ОБЩИЕ РЕЗУЛЬТАТЫ
 
-Выведи ровно эти 4 пункта в указанном порядке, используя данные из поля "ОБЩИЕ ЦИФРЫ КАМПАНИИ":
-
-ЕСЛИ ПЛАН ВЫПОЛНЕН (факт ≥ план):
-• Вместо {план} просмотров у нас {факт} просмотров! Это в {факт/план} раз выше планируемого охвата!
-• Итоговый CPV по проекту: {факт_cpv} ₽ при плановом {план_cpv} ₽ — в {план_cpv/факт_cpv} раза ниже
-• Виральный охват по проекту составил {факт−план} просмотров (фактический минус плановый), что эквивалентно экономии {(факт−план)/2} рублей (при средней цене просмотра по рекламному рынку в 2 рубля)
-• Суммарный органический охват — {органика} просмотров
-
-ЕСЛИ ПЛАН НЕ ВЫПОЛНЕН (факт < план):
-• Фактический охват составил {факт} просмотров при плане {план} — выполнение плана на {факт/план×100}%
-• Итоговый CPV по проекту: {факт_cpv} ₽ при плановом {план_cpv} ₽ — в {факт_cpv/план_cpv} раза выше плана
-• Суммарный органический охват — {органика} просмотров
-(третий пункт про экономию НЕ пишем — план не выполнен)
-
-Правила:
-- Множители округляй до одного знака после запятой, используй ЗАПЯТУЮ как десятичный разделитель: «в 22,4 раза», НЕ «в 22.4 раз»
-- Склонение: 1,0 → «раз», 1,1–1,4 → «раза», 1,5–1,9 → «раза», 2,0+ → «раза» (всегда «раза» кроме ровно 1)
-- Цифры разделяй запятыми: 6,170,892
-- НЕ добавляй другие пункты в этот раздел
-- НИКОГДА не пиши отрицательные числа в виральном охвате или экономии
+Используй готовые строки из поля "ГОТОВЫЕ СТРОКИ ДЛЯ РАЗДЕЛА 1" дословно.
+Не пересчитывай множители, CPV, экономию или разницу самостоятельно.
+Не заменяй формулировки "соответствует плану" на "в 1,0 раза".
 
 СВЕРХРЕЗУЛЬТАТЫ
 
@@ -209,6 +192,86 @@ async def analyze_campaign(
         overreach = total_actual_reach - total_planned_reach
         savings_str = f"\n- Расчётная экономия бюджета: {total_savings:,.0f} ₽ (сверхплановый охват {overreach:,} ÷ 2 руб. рыночный CPV)"
 
+    def _fmt_money(value: float) -> str:
+        return f"{value:,.2f}".replace(".", ",")
+
+    def _fmt_cpv_diff(value: float) -> str:
+        if value < 1:
+            return f"{round(value * 100)} копеек"
+        return f"{_fmt_money(value)} ₽"
+
+    def _fmt_ratio(r: float) -> str:
+        """Форматирует множитель: запятая как десятичный разделитель, склонение «раза»."""
+        s = f"{r:.1f}".replace(".", ",")
+        return f"в {s} раза"
+
+    def _format_section_1_lines() -> str:
+        reach_diff = total_actual_reach - total_planned_reach
+        reach_abs_diff = abs(reach_diff)
+        reach_factor = max(reach_ratio, 1 / reach_ratio if reach_ratio > 0 else 0)
+
+        if total_planned_reach <= 0:
+            reach_line = f"• Фактический охват по проекту составил {total_actual_reach:,} просмотров"
+        elif reach_factor < 1.1:
+            reach_line = (
+                f"• Фактический охват равен запланированному: {total_actual_reach:,} просмотров "
+                f"при плане {total_planned_reach:,}"
+            )
+        elif reach_factor < 1.3:
+            direction = "больше" if reach_diff > 0 else "меньше"
+            reach_line = (
+                f"• Фактический охват составил {total_actual_reach:,} просмотров при плане "
+                f"{total_planned_reach:,} — это на {reach_abs_diff:,} просмотров {direction} плана"
+            )
+        elif reach_ratio < 1:
+            completion = total_actual_reach / total_planned_reach * 100
+            reach_line = (
+                f"• Фактический охват составил {total_actual_reach:,} просмотров при плане "
+                f"{total_planned_reach:,} — выполнение плана на {completion:.0f}%"
+            )
+        else:
+            reach_line = (
+                f"• Вместо {total_planned_reach:,} просмотров у нас {total_actual_reach:,} просмотров! "
+                f"Это {_fmt_ratio(reach_ratio)} выше планируемого охвата!"
+            )
+
+        cpv_diff = actual_cpv - planned_cpv
+        cpv_abs_diff = abs(cpv_diff)
+        cpv_factor = max(cpv_ratio, 1 / cpv_ratio if cpv_ratio > 0 else 0)
+
+        if planned_cpv <= 0 or actual_cpv <= 0:
+            cpv_line = f"• Итоговый CPV по проекту: {_fmt_money(actual_cpv)} ₽"
+        elif cpv_factor < 1.1:
+            cpv_line = (
+                f"• Итоговый CPV по проекту соответствует плану: {_fmt_money(actual_cpv)} ₽ "
+                f"при плановом {_fmt_money(planned_cpv)} ₽"
+            )
+        elif cpv_factor < 1.3:
+            direction = "меньше" if actual_cpv < planned_cpv else "больше"
+            cpv_line = (
+                f"• Итоговый CPV по проекту: {_fmt_money(actual_cpv)} ₽ при плановом "
+                f"{_fmt_money(planned_cpv)} ₽ — на {_fmt_cpv_diff(cpv_abs_diff)} {direction} плана"
+            )
+        elif actual_cpv < planned_cpv:
+            cpv_line = (
+                f"• Итоговый CPV по проекту: {_fmt_money(actual_cpv)} ₽ при плановом "
+                f"{_fmt_money(planned_cpv)} ₽ — {_fmt_ratio(planned_cpv / actual_cpv)} ниже"
+            )
+        else:
+            cpv_line = (
+                f"• Итоговый CPV по проекту: {_fmt_money(actual_cpv)} ₽ при плановом "
+                f"{_fmt_money(planned_cpv)} ₽ — {_fmt_ratio(actual_cpv / planned_cpv)} выше плана"
+            )
+
+        lines = [reach_line, cpv_line]
+        if reach_diff > 0:
+            lines.append(
+                f"• Виральный охват по проекту составил {reach_diff:,} просмотров, "
+                f"что эквивалентно экономии {total_savings:,.0f} рублей"
+            )
+        lines.append(f"• Суммарный органический охват — {total_organic_reach:,} просмотров")
+        return "\n".join(lines)
+
     # CPV считается только от бюджета размещений (без менеджмента и доп. расходов)
     placement_budget = total_placement_budget if total_placement_budget else total_budget
     actual_cpv = placement_budget / total_actual_reach if total_actual_reach > 0 else 0
@@ -216,15 +279,11 @@ async def analyze_campaign(
     cpv_ratio = planned_cpv / actual_cpv if actual_cpv > 0 else 0
     reach_ratio = total_actual_reach / total_planned_reach if total_planned_reach > 0 else 0
     plan_exceeded = total_actual_reach >= total_planned_reach  # выполнен ли план
+    section_1_text = _format_section_1_lines()
 
     # --- Предварительный расчёт кандидатов для раздела 2 ---
     # Группируем по URL: один пост — одна строка с перечислением всех превышений.
     # Делаем это в Python, чтобы GPT не мог пропустить ни одного кандидата.
-
-    def _fmt_ratio(r: float) -> str:
-        """Форматирует множитель: запятая как десятичный разделитель, склонение «раза»."""
-        s = f"{r:.1f}".replace(".", ",")
-        return f"в {s} раза"
 
     # post_url → {"max_ratio": float, "parts": [str], "views_ratio": float}
     post_hits: dict[str, dict] = {}
@@ -325,6 +384,9 @@ async def analyze_campaign(
 - Расчётная экономия: {total_savings:,.0f} ₽ {"(только если виральный охват положительный)" if viral_reach >= 0 else "(не указывай — план не выполнен)"}
 - Органический охват: {total_organic_reach:,} просмотров
 
+ГОТОВЫЕ СТРОКИ ДЛЯ РАЗДЕЛА 1 (вставь их дословно, не перефразируй):
+{section_1_text}
+
 ПУБЛИКАЦИИ:
 {posts_text}
 
@@ -355,6 +417,7 @@ async def analyze_campaign(
 
 текст
 
+Раздел 1: используй строки из блока "ГОТОВЫЕ СТРОКИ ДЛЯ РАЗДЕЛА 1" дословно.
 Раздел 2: используй строки из блока "ГОТОВЫЕ СТРОКИ ДЛЯ РАЗДЕЛА 2" дословно."""
 
     # Запускаем акценты и анализ комментариев параллельно
