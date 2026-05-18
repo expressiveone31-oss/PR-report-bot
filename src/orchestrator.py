@@ -198,10 +198,10 @@ async def process_links(
     budget: float,
     project_name: str = "",
     plan_by_url: dict | None = None,
-) -> tuple[str, int, dict]:
+) -> tuple[str, int]:
     """
     Новый диалоговый режим — принимает ссылки напрямую без МП.
-    Возвращает (текст акцентов, фактический paid-охват, диагностика API).
+    Возвращает (текст акцентов, суммарный фактический охват).
     """
     from src.parsers.mediaplan import Post
 
@@ -255,51 +255,38 @@ async def process_links(
         for (i, _), result in zip(other_posts, other_results):
             posts_data[i] = result
 
-    # Суммарный paid-охват из API. Органику не смешиваем с платными размещениями.
-    paid_actual = 0
-    organic_actual_from_api = 0
-    api_breakdown = []
-    for post_dict, post in zip(posts_data, all_posts):
-        stats = post_dict["stats"]
-        views = stats.get("views") or 0
-        if post.is_organic:
-            organic_actual_from_api += views
-        else:
-            paid_actual += views
-            api_breakdown.append({
-                "url": post.post_url,
-                "platform": post.platform,
-                "views": views,
-                "error": stats.get("error"),
-            })
+    # Суммарный охват из API
+    total_actual = 0
+    for post_dict in posts_data:
+        views = post_dict["stats"].get("views") or 0
+        total_actual += views
 
     # Органика — если передана цифрой вручную, используем её
-    total_organic_reach = organic_reach_manual if organic_reach_manual is not None else organic_actual_from_api
+    total_organic_reach = organic_reach_manual or sum(
+        p["stats"].get("views") or 0
+        for p, post in zip(posts_data, all_posts)
+        if post.is_organic
+    )
+    if organic_reach_manual:
+        total_actual += organic_reach_manual
 
     # Экономия = (факт - план) ÷ 2
     MARKET_CPV = 2.0
-    overreach = paid_actual - planned_reach
+    overreach = total_actual - planned_reach
     total_savings = max(overreach / MARKET_CPV, 0)
 
     result = await analyze_campaign(
         project_name=project_name or "Без названия",
         posts_data=list(posts_data),
         total_planned_reach=planned_reach,
-        total_actual_reach=paid_actual,
+        total_actual_reach=total_actual,
         total_budget=budget,
         total_savings=total_savings,
         total_organic_reach=total_organic_reach,
         total_placement_budget=budget,  # в диалоговом режиме пользователь вводит бюджет размещений
     )
 
-    diagnostics = {
-        "paid_actual": paid_actual,
-        "organic_actual": total_organic_reach,
-        "total_with_organic": paid_actual + total_organic_reach,
-        "api_breakdown": api_breakdown,
-    }
-
-    return result, paid_actual, diagnostics
+    return result, total_actual
 
 
 def _detect_platform(url: str) -> str:
