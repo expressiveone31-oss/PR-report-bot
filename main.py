@@ -212,15 +212,16 @@ async def got_organic(message: Message, state: FSMContext) -> None:
     if text.lower() in ("нет", "no", "-", "0"):
         pass
     else:
-        # Сначала проверяем ссылки: в URL есть цифры, и их нельзя принимать за ручной охват.
-        organic_links = extract_links(text)
-        if not organic_links:
-            parsed = parse_number(text)
-            try:
-                organic_reach_manual = int(parsed) if parsed is not None else None
-            except (TypeError, ValueError):
-                organic_reach_manual = None
-            if organic_reach_manual is None:
+        # Пробуем распарсить как число
+        parsed = parse_number(text)
+        try:
+            organic_reach_manual = int(parsed) if parsed is not None else None
+        except (TypeError, ValueError):
+            organic_reach_manual = None
+        if organic_reach_manual is None:
+            # Пробуем как ссылки
+            organic_links = extract_links(text)
+            if not organic_links:
                 await message.answer(
                     "Не понял. Скинь ссылки на органические посты, суммарный охват цифрой, или напиши *нет*"
                 )
@@ -303,14 +304,6 @@ async def got_project_name(message: Message, state: FSMContext) -> None:
         ])
 
     await message.answer("\n".join(api_lines), parse_mode=None)
-
-    if not diagnostics["api_breakdown"] or paid_actual == 0:
-        await message.answer(
-            "Paid-охват не собрался: API не вернул просмотры по paid-ссылкам. "
-            "Останавливаю генерацию отчёта, чтобы не выдать неверные выводы.",
-            parse_mode=None,
-        )
-        return
 
     # Затем акценты — отправляем без Markdown чтобы избежать ошибок парсинга
     for chunk in send_long(result):
