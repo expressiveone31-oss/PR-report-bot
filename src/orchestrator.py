@@ -276,6 +276,16 @@ async def process_links(
     # Органика — если передана цифрой вручную, используем её
     total_organic_reach = organic_reach_manual if organic_reach_manual is not None else organic_actual_from_api
 
+    diagnostics = {
+        "paid_actual": paid_actual,
+        "organic_actual": total_organic_reach,
+        "total_with_organic": paid_actual + total_organic_reach,
+        "api_breakdown": api_breakdown,
+    }
+
+    if not api_breakdown or paid_actual == 0:
+        return "", paid_actual, diagnostics
+
     # Экономия = (факт - план) ÷ 2
     MARKET_CPV = 2.0
     overreach = paid_actual - planned_reach
@@ -291,13 +301,6 @@ async def process_links(
         total_organic_reach=total_organic_reach,
         total_placement_budget=budget,  # в диалоговом режиме пользователь вводит бюджет размещений
     )
-
-    diagnostics = {
-        "paid_actual": paid_actual,
-        "organic_actual": total_organic_reach,
-        "total_with_organic": paid_actual + total_organic_reach,
-        "api_breakdown": api_breakdown,
-    }
 
     return result, paid_actual, diagnostics
 
