@@ -291,14 +291,16 @@ async def got_project_name(message: Message, state: FSMContext) -> None:
     lines = [f"Фактический охват по данным API: {total_actual:,}", "", "Разбивка paid по постам:"]
     for b in paid_rows:
         err = f"  ⚠️ {b['error']}" if b.get("error") else ""
-        lines.append(f"• {b['views']:,} — {b['url']}{err}")
+        src = " [tgstat]" if b.get("tgstat_fallback") else ""
+        lines.append(f"• {b['views']:,}{src} — {b['url']}{err}")
     lines.append(f"Итого paid: {paid_sum:,}")
     if organic_rows:
         lines.append("")
         lines.append("Органика:")
         for b in organic_rows:
             err = f"  ⚠️ {b['error']}" if b.get("error") else ""
-            lines.append(f"• {b['views']:,} — {b['url']}{err}")
+            src = " [tgstat]" if b.get("tgstat_fallback") else ""
+            lines.append(f"• {b['views']:,}{src} — {b['url']}{err}")
 
     await message.answer("\n".join(lines), parse_mode=None)
 

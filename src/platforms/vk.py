@@ -49,6 +49,13 @@ def _parse_vk_url(url: str) -> Optional[tuple[int, int]]:
     return None
 
 
+def _parse_vk_clip_url(url: str) -> Optional[tuple[int, int]]:
+    match = re.search(r"clip(-?\d+)_(\d+)", url)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    return None
+
+
 async def _get_channel_average(session: aiohttp.ClientSession,
                                 owner_id: int,
                                 exclude_post_id: int) -> ChannelAverage:
@@ -90,6 +97,51 @@ async def _get_channel_average(session: aiohttp.ClientSession,
 
 async def get_post_stats(post_url: str) -> VKPostStats:
     parsed = _parse_vk_url(post_url)
+    clip_parsed = _parse_vk_clip_url(post_url)
+
+    if not parsed and clip_parsed:
+        # VK clip: используем video.get
+        owner_id, video_id = clip_parsed
+        connector = aiohttp.TCPConnector(ssl=SSL_CONTEXT)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            params = {
+                "videos": f"{owner_id}_{video_id}",
+                "extended": 1,
+                "access_token": VK_ACCESS_TOKEN,
+                "v": VK_API_VERSION,
+            }
+            async with session.get(f"{VK_API_BASE}/video.get", params=params) as resp:
+                data = await resp.json()
+            if "error" in data:
+                return VKPostStats(post_url=post_url, owner_id=owner_id, post_id=video_id,
+                                   error=data["error"].get("error_msg", "VK API error"))
+            items = data.get("response", {}).get("items", [])
+            if not items:
+                return VKPostStats(post_url=post_url, owner_id=owner_id, post_id=video_id,
+                                   error="Клип не найден")
+            item = items[0]
+            # Название группы
+            channel_title = None
+            if owner_id < 0:
+                gp = {"group_ids": str(-owner_id), "fields": "name",
+                      "access_token": VK_ACCESS_TOKEN, "v": VK_API_VERSION}
+                async with session.get(f"{VK_API_BASE}/groups.getById", params=gp) as resp:
+                    gd = await resp.json()
+                groups = gd.get("response", {}).get("groups") or gd.get("response", [])
+                if groups:
+                    channel_title = groups[0].get("name")
+        return VKPostStats(
+            post_url=post_url,
+            owner_id=owner_id,
+            post_id=video_id,
+            views=item.get("views"),
+            likes=item.get("likes", {}).get("count") if isinstance(item.get("likes"), dict) else item.get("likes"),
+            reposts=item.get("reposts", {}).get("count") if isinstance(item.get("reposts"), dict) else item.get("reposts"),
+            comments=item.get("comments", {}).get("count") if isinstance(item.get("comments"), dict) else item.get("comments"),
+            channel_title=channel_title,
+            channel_avg=ChannelAverage(),
+        )
+
     if not parsed:
         return VKPostStats(post_url=post_url, owner_id=0, post_id=0,
                            error="Не удалось распарсить ссылку VK")

@@ -7,7 +7,7 @@ import asyncio
 import logging
 from src.parsers.mediaplan import MediaPlan, Post
 import os
-from src.platforms import vk, telemetr, hikerapi, pyrogram_tg
+from src.platforms import vk, telemetr, tgstat, hikerapi, pyrogram_tg
 from src.analyzer.openai_analyzer import analyze_campaign
 
 # Pyrogram доступен если есть файл сессии ИЛИ string session в переменной окружения
@@ -49,7 +49,6 @@ async def _fetch_stats_for_post(post: Post) -> dict:
         elif post.platform == "telegram" and post.post_url:
             logger.info(f"Telemetr: fetching {post.post_url}")
             result = await telemetr.get_post_stats(post.post_url)
-            # Подставляем название канала из API если name — это ссылка
             if result.channel_title and post.name.startswith("http"):
                 post.name = result.channel_title
             stats = {
@@ -70,11 +69,37 @@ async def _fetch_stats_for_post(post: Post) -> dict:
                 }
             logger.info(f"Telemetr done: views={result.views}, channel_title={result.channel_title}, avg_views={result.channel_avg.avg_views if result.channel_avg else None}, error={result.error}")
 
+            # TGStat fallback: если Telemetr вернул ошибку, None, или меньше 50% планового охвата поста
+            planned = post.planned_reach or 0
+            telemetr_views = result.views or 0
+            needs_fallback = (
+                result.error is not None
+                or result.views is None
+                or (planned > 0 and telemetr_views < planned * 0.5)
+            )
+            if needs_fallback:
+                logger.info(f"TGStat fallback triggered (telemetr={telemetr_views}, plan={planned}): {post.post_url}")
+                fallback = await tgstat.get_post_stats(post.post_url)
+                if not fallback.error and fallback.views is not None:
+                    logger.info(f"TGStat fallback OK: views={fallback.views}")
+                    if fallback.channel_title and post.name.startswith("http"):
+                        post.name = fallback.channel_title
+                    stats["views"] = fallback.views
+                    stats["forwards"] = fallback.forwards
+                    stats["reactions_count"] = fallback.reactions_count
+                    stats["comments"] = fallback.comments
+                    stats["channel_subscribers"] = fallback.channel_subscribers
+                    stats["error"] = None
+                    stats["tgstat_fallback"] = True
+                else:
+                    logger.warning(f"TGStat fallback failed: {fallback.error}")
+
             # Если есть комментарии и Pyrogram авторизован — парсим тексты
             # Минимальный порог: 5+ комментариев, иначе не стоит парсить
-            if PYROGRAM_AVAILABLE and result.comments and result.comments >= 5:
+            comments_actual = stats.get("comments") or 0
+            if PYROGRAM_AVAILABLE and comments_actual >= 5:
                 logger.info(f"Pyrogram: fetching comments for {post.post_url}")
-                tg_comments = await pyrogram_tg.get_post_comments(post.post_url, limit=5)
+                tg_comments = await pyrogram_tg.get_post_comments(post.post_url, limit=5)  # type: ignore
                 if tg_comments.top_comments:
                     stats["top_comments"] = tg_comments.top_comments
                     logger.info(f"Pyrogram done: {len(tg_comments.top_comments)} comments")
@@ -266,6 +291,7 @@ async def process_links(
             "is_organic": post.is_organic,
             "views": views,
             "error": post_dict["stats"].get("error"),
+            "tgstat_fallback": post_dict["stats"].get("tgstat_fallback", False),
         })
 
     # Органика — если передана цифрой вручную, используем её
