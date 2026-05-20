@@ -69,30 +69,37 @@ async def _fetch_stats_for_post(post: Post) -> dict:
                 }
             logger.info(f"Telemetr done: views={result.views}, channel_title={result.channel_title}, avg_views={result.channel_avg.avg_views if result.channel_avg else None}, error={result.error}")
 
-            # TGStat fallback: если Telemetr вернул ошибку, None, или меньше 50% планового охвата поста
-            planned = post.planned_reach or 0
+            # TGStat перекрёстная проверка: запускаем параллельно с Telemetr и берём большее значение.
+            # Это защищает от случаев когда Telemetr занижает реальный охват.
+            logger.info(f"TGStat cross-check: fetching {post.post_url}")
+            fallback = await tgstat.get_post_stats(post.post_url)
             telemetr_views = result.views or 0
-            needs_fallback = (
-                result.error is not None
-                or result.views is None
-                or (planned > 0 and telemetr_views < planned * 0.5)
-            )
-            if needs_fallback:
-                logger.info(f"TGStat fallback triggered (telemetr={telemetr_views}, plan={planned}): {post.post_url}")
-                fallback = await tgstat.get_post_stats(post.post_url)
-                if not fallback.error and fallback.views is not None:
-                    logger.info(f"TGStat fallback OK: views={fallback.views}")
-                    if fallback.channel_title and post.name.startswith("http"):
-                        post.name = fallback.channel_title
-                    stats["views"] = fallback.views
-                    stats["forwards"] = fallback.forwards
-                    stats["reactions_count"] = fallback.reactions_count
-                    stats["comments"] = fallback.comments
-                    stats["channel_subscribers"] = fallback.channel_subscribers
-                    stats["error"] = None
-                    stats["tgstat_fallback"] = True
-                else:
-                    logger.warning(f"TGStat fallback failed: {fallback.error}")
+            tgstat_views = fallback.views or 0
+
+            if not fallback.error and tgstat_views > telemetr_views:
+                logger.info(f"TGStat wins: tgstat={tgstat_views} > telemetr={telemetr_views}")
+                if fallback.channel_title and post.name.startswith("http"):
+                    post.name = fallback.channel_title
+                stats["views"] = tgstat_views
+                stats["forwards"] = fallback.forwards or stats.get("forwards")
+                stats["reactions_count"] = fallback.reactions_count or stats.get("reactions_count")
+                stats["comments"] = fallback.comments or stats.get("comments")
+                stats["channel_subscribers"] = fallback.channel_subscribers or stats.get("channel_subscribers")
+                stats["error"] = None
+                stats["tgstat_fallback"] = True
+            elif result.error and not fallback.error and tgstat_views > 0:
+                logger.info(f"TGStat used (telemetr error): tgstat={tgstat_views}")
+                if fallback.channel_title and post.name.startswith("http"):
+                    post.name = fallback.channel_title
+                stats["views"] = tgstat_views
+                stats["forwards"] = fallback.forwards
+                stats["reactions_count"] = fallback.reactions_count
+                stats["comments"] = fallback.comments
+                stats["channel_subscribers"] = fallback.channel_subscribers
+                stats["error"] = None
+                stats["tgstat_fallback"] = True
+            else:
+                logger.info(f"Telemetr wins or TGStat failed: telemetr={telemetr_views}, tgstat={tgstat_views}, tgstat_err={fallback.error}")
 
             # Если есть комментарии и Pyrogram авторизован — парсим тексты
             # Минимальный порог: 5+ комментариев, иначе не стоит парсить
