@@ -267,7 +267,7 @@ async def got_project_name(message: Message, state: FSMContext) -> None:
     )
 
     try:
-        result, total_actual = await process_links(
+        result, total_actual, breakdown = await process_links(
             paid_links=paid_links,
             organic_links=organic_links,
             organic_reach_manual=organic_reach_manual,
@@ -283,13 +283,24 @@ async def got_project_name(message: Message, state: FSMContext) -> None:
         )
         return
 
-    # Сначала показываем собранный охват
-    await message.answer(
-        f"Фактический охват по данным API: {total_actual:,}\n\n"
-        f"Если цифра не совпадает с вашими данными — это нормально: "
-        f"просмотры продолжают расти после публикации.",
-        parse_mode=None,
-    )
+    # Сначала показываем разбивку по каждому посту — для диагностики
+    paid_rows = [b for b in breakdown if not b["is_organic"]]
+    organic_rows = [b for b in breakdown if b["is_organic"]]
+    paid_sum = sum(b["views"] for b in paid_rows)
+
+    lines = [f"Фактический охват по данным API: {total_actual:,}", "", "Разбивка paid по постам:"]
+    for b in paid_rows:
+        err = f"  ⚠️ {b['error']}" if b.get("error") else ""
+        lines.append(f"• {b['views']:,} — {b['url']}{err}")
+    lines.append(f"Итого paid: {paid_sum:,}")
+    if organic_rows:
+        lines.append("")
+        lines.append("Органика:")
+        for b in organic_rows:
+            err = f"  ⚠️ {b['error']}" if b.get("error") else ""
+            lines.append(f"• {b['views']:,} — {b['url']}{err}")
+
+    await message.answer("\n".join(lines), parse_mode=None)
 
     # Затем акценты — отправляем без Markdown чтобы избежать ошибок парсинга
     for chunk in send_long(result):

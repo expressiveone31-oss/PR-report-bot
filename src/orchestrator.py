@@ -255,11 +255,18 @@ async def process_links(
         for (i, _), result in zip(other_posts, other_results):
             posts_data[i] = result
 
-    # Суммарный охват из API
+    # Суммарный охват из API + разбивка по постам для диагностики
     total_actual = 0
-    for post_dict in posts_data:
+    breakdown = []
+    for post_dict, post in zip(posts_data, all_posts):
         views = post_dict["stats"].get("views") or 0
         total_actual += views
+        breakdown.append({
+            "url": post.post_url,
+            "is_organic": post.is_organic,
+            "views": views,
+            "error": post_dict["stats"].get("error"),
+        })
 
     # Органика — если передана цифрой вручную, используем её
     total_organic_reach = organic_reach_manual or sum(
@@ -286,7 +293,7 @@ async def process_links(
         total_placement_budget=budget,  # в диалоговом режиме пользователь вводит бюджет размещений
     )
 
-    return result, total_actual
+    return result, total_actual, breakdown
 
 
 def _detect_platform(url: str) -> str:
