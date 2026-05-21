@@ -78,8 +78,10 @@ async def _fetch_stats_for_post(post: Post) -> dict:
 
             if not fallback.error and tgstat_views > telemetr_views:
                 logger.info(f"TGStat wins: tgstat={tgstat_views} > telemetr={telemetr_views}")
-                if fallback.channel_title and post.name.startswith("http"):
+                # Название: TGStat приоритетнее, но если у него нет — оставляем от Telemetr
+                if fallback.channel_title:
                     post.name = fallback.channel_title
+                # views берём от TGStat, остальное — лучшее из двух
                 stats["views"] = tgstat_views
                 stats["forwards"] = fallback.forwards or stats.get("forwards")
                 stats["reactions_count"] = fallback.reactions_count or stats.get("reactions_count")
@@ -89,7 +91,7 @@ async def _fetch_stats_for_post(post: Post) -> dict:
                 stats["tgstat_fallback"] = True
             elif result.error and not fallback.error and tgstat_views > 0:
                 logger.info(f"TGStat used (telemetr error): tgstat={tgstat_views}")
-                if fallback.channel_title and post.name.startswith("http"):
+                if fallback.channel_title:
                     post.name = fallback.channel_title
                 stats["views"] = tgstat_views
                 stats["forwards"] = fallback.forwards

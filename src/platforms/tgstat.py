@@ -58,6 +58,19 @@ def _parse_item(post_url: str, item: dict) -> TGStatPostStats:
     )
 
 
+async def _get_channel_title(session: aiohttp.ClientSession, channel_id: str) -> Optional[str]:
+    """Получает название канала через channels/stat."""
+    try:
+        params = {"token": TGSTAT_TOKEN, "channelId": channel_id}
+        async with session.get(f"{TGSTAT_BASE}/channels/stat", params=params) as resp:
+            data = await resp.json()
+        if data.get("status") == "ok":
+            return data.get("response", {}).get("title")
+    except Exception:
+        pass
+    return None
+
+
 async def get_post_stats(post_url: str) -> TGStatPostStats:
     parsed = _parse_tg_url(post_url)
     if not parsed:
@@ -73,12 +86,17 @@ async def get_post_stats(post_url: str) -> TGStatPostStats:
             data = await resp.json()
 
         if data.get("status") == "ok":
-            return _parse_item(post_url, data.get("response", {}))
+            result = _parse_item(post_url, data.get("response", {}))
+            # posts/get возвращает channelTitle — подставляем если есть
+            if not result.channel_title:
+                result.channel_title = await _get_channel_title(session, channel)
+            return result
 
         # posts/get не нашёл — ищем через channels/posts с пагинацией
-        # TGStat индексирует посты с задержкой, поэтому прямой запрос может не работать
         if data.get("error") == "post_not_found":
             post_id_int = int(post_id)
+            channel_title = await _get_channel_title(session, channel)
+
             for offset in (0, 50, 100, 150):
                 params2 = {
                     "token": TGSTAT_TOKEN,
@@ -100,11 +118,11 @@ async def get_post_stats(post_url: str) -> TGStatPostStats:
 
                 for item in items:
                     link = item.get("link", "")
-                    # Совпадение по post_id в конце ссылки
                     if link.endswith(f"/{post_id}") or link.endswith(f"/{post_id_int}"):
-                        return _parse_item(post_url, item)
+                        result = _parse_item(post_url, item)
+                        result.channel_title = channel_title
+                        return result
 
-                # Если дошли до постов старше нужного — прекращаем поиск
                 oldest = items[-1].get("link", "")
                 oldest_id_match = re.search(r"/(\d+)$", oldest)
                 if oldest_id_match and int(oldest_id_match.group(1)) < post_id_int:
