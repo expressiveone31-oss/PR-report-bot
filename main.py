@@ -16,7 +16,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
 
 from src.config import TELEGRAM_BOT_TOKEN
-from src.orchestrator import process_links
+from src.orchestrator import process_links, process_mediaplan
 
 
 
@@ -34,6 +34,7 @@ dp = Dispatcher(storage=MemoryStorage())
 
 
 class ReportStates(StatesGroup):
+    waiting_csv_or_links  = State()   # первый шаг: CSV или ссылки
     waiting_paid_links    = State()
     waiting_mediaplan_csv = State()   # опциональный CSV с планом по каждому посту
     waiting_planned_reach = State()
@@ -99,10 +100,96 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
         "Привет! Помогу сформулировать акценты для отчёта Digital PR.\n\n"
-        "Для начала скинь ссылки на *paid-посты* — по одной в строке или все вместе.\n\n"
-        "Поддерживаю: VK, Telegram, Instagram"
+        "Скинь *CSV-файл медиаплана* — я извлеку всё сам.\n\n"
+        "Или напиши *ссылки* вручную — тогда проведу тебя по шагам.\n\n"
+        "Поддерживаю: VK, Telegram, Instagram, Twitter/X"
     )
-    await state.set_state(ReportStates.waiting_paid_links)
+    await state.set_state(ReportStates.waiting_csv_or_links)
+
+
+# ШАГ 0а — получили CSV медиаплана
+@dp.message(ReportStates.waiting_csv_or_links, F.document)
+async def got_csv_mediaplan(message: Message, state: FSMContext) -> None:
+    doc = message.document
+    if not doc.file_name.lower().endswith(".csv"):
+        await message.answer("Нужен файл в формате CSV. Попробуй снова или напиши ссылки вручную.")
+        return
+
+    await message.answer("Читаю медиаплан...")
+
+    file = await bot.get_file(doc.file_id)
+    file_bytes = await bot.download_file(file.file_path)
+    content = file_bytes.read().decode("utf-8-sig")
+
+    # Название проекта из имени файла
+    project_name = os.path.splitext(doc.file_name)[0].strip()
+
+    try:
+        from src.parsers.universal_mp import parse_mediaplan_auto
+        mp, schema = await parse_mediaplan_auto(content)
+    except Exception as e:
+        logger.error(f"MP parse error: {e}", exc_info=True)
+        await message.answer(
+            f"Не удалось разобрать МП: {e}\n\nПопробуй скинуть ссылки вручную — напиши /start"
+        )
+        return
+
+    if not mp.paid_posts:
+        await message.answer(
+            "Не нашёл paid-постов в МП. Проверь файл или скинь ссылки вручную (/start)."
+        )
+        return
+
+    # Показываем что нашли — для проверки перед запуском
+    paid_count = len(mp.paid_posts)
+    organic_count = len(mp.organic_posts)
+    total_plan = mp.total_planned_reach
+    total_budget = mp.total_budget
+
+    summary_lines = [
+        f"Проект: *{project_name}*",
+        f"Paid-постов: *{paid_count}*  |  Органика: *{organic_count}* постов",
+        f"Плановый охват: *{total_plan:,}*",
+        f"Бюджет размещений: *{total_budget:,.0f} ₽*",
+        "",
+        "Paid-посты из МП:",
+    ]
+    for p in mp.paid_posts:
+        summary_lines.append(f"• {p.name} — план {p.planned_reach:,} — {p.post_url}")
+
+    await message.answer("\n".join(summary_lines))
+    await message.answer("Иду за данными через API — это займёт до минуты...")
+
+    try:
+        result = await process_mediaplan(mp, project_name=project_name)
+    except Exception as e:
+        logger.error(f"Processing error: {e}", exc_info=True)
+        await message.answer("Ошибка при сборе данных. Попробуй ещё раз (/start).")
+        return
+
+    await state.clear()
+    for chunk in send_long(result):
+        await message.answer(chunk, parse_mode=None)
+
+
+# ШАГ 0б — получили текст (ссылки) вместо CSV
+@dp.message(ReportStates.waiting_csv_or_links)
+async def got_links_instead_of_csv(message: Message, state: FSMContext) -> None:
+    links = extract_links(message.text or "")
+    if links:
+        await state.update_data(paid_links=links)
+        await message.answer(
+            f"Принял *{len(links)}* ссылок.\n\n"
+            "Хочешь сравнивать каждый пост с его плановым охватом? "
+            "Тогда скинь CSV медиаплана.\n\n"
+            "Если не нужно — напиши *нет*."
+        )
+        await state.set_state(ReportStates.waiting_mediaplan_csv)
+    else:
+        await message.answer(
+            "Не нашёл ни ссылок, ни CSV-файла.\n\n"
+            "Скинь CSV медиаплана или ссылки на paid-посты (начинаются с https://)."
+        )
 
 
 @dp.message(Command("cancel"))
