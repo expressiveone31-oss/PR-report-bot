@@ -102,7 +102,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         "Привет! Помогу сформулировать акценты для отчёта Digital PR.\n\n"
         "Скинь *CSV-файл медиаплана* — я извлеку всё сам.\n\n"
         "Или напиши *ссылки* вручную — тогда проведу тебя по шагам.\n\n"
-        "Поддерживаю: VK, Telegram, Instagram, Twitter/X"
+        "Поддерживаю: VK, Telegram, Instagram"
     )
     await state.set_state(ReportStates.waiting_csv_or_links)
 
