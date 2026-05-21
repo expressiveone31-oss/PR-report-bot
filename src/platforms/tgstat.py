@@ -38,34 +38,8 @@ def _parse_tg_url(url: str) -> Optional[tuple[str, str]]:
     return None
 
 
-async def get_post_stats(post_url: str) -> TGStatPostStats:
-    parsed = _parse_tg_url(post_url)
-    if not parsed:
-        return TGStatPostStats(post_url=post_url,
-                               error="Не удалось распарсить ссылку Telegram")
-
-    channel, post_id = parsed
-
-    params = {
-        "token": TGSTAT_TOKEN,
-        "postLink": post_url,
-    }
-
-    async with aiohttp.ClientSession() as session:
-        async with session.get(
-            f"{TGSTAT_BASE}/posts/get", params=params
-        ) as resp:
-            data = await resp.json()
-
-    if data.get("status") != "ok":
-        return TGStatPostStats(
-            post_url=post_url,
-            error=data.get("error", "TGStat API error"),
-        )
-
-    item = data.get("response", {})
-
-    # Реакции могут быть списком объектов или суммой
+def _parse_item(post_url: str, item: dict) -> TGStatPostStats:
+    """Собирает TGStatPostStats из объекта поста TGStat."""
     reactions_raw = item.get("reactions")
     reactions_count = None
     if isinstance(reactions_raw, list):
@@ -75,10 +49,70 @@ async def get_post_stats(post_url: str) -> TGStatPostStats:
 
     return TGStatPostStats(
         post_url=post_url,
-        views=item.get("viewsCount"),
-        forwards=item.get("forwardsCount"),
+        views=item.get("viewsCount") or item.get("views"),
+        forwards=item.get("forwardsCount") or item.get("forwards"),
         reactions_count=reactions_count,
-        comments=item.get("commentsCount"),
+        comments=item.get("commentsCount") or item.get("comments"),
         channel_title=item.get("channelTitle"),
         channel_subscribers=item.get("channelMembersCount"),
+    )
+
+
+async def get_post_stats(post_url: str) -> TGStatPostStats:
+    parsed = _parse_tg_url(post_url)
+    if not parsed:
+        return TGStatPostStats(post_url=post_url,
+                               error="Не удалось распарсить ссылку Telegram")
+
+    channel, post_id = parsed
+
+    async with aiohttp.ClientSession() as session:
+        # Сначала пробуем быстрый метод posts/get
+        params = {"token": TGSTAT_TOKEN, "postLink": post_url}
+        async with session.get(f"{TGSTAT_BASE}/posts/get", params=params) as resp:
+            data = await resp.json()
+
+        if data.get("status") == "ok":
+            return _parse_item(post_url, data.get("response", {}))
+
+        # posts/get не нашёл — ищем через channels/posts с пагинацией
+        # TGStat индексирует посты с задержкой, поэтому прямой запрос может не работать
+        if data.get("error") == "post_not_found":
+            post_id_int = int(post_id)
+            for offset in (0, 50, 100, 150):
+                params2 = {
+                    "token": TGSTAT_TOKEN,
+                    "channelId": channel,
+                    "limit": 50,
+                    "offset": offset,
+                }
+                async with session.get(
+                    f"{TGSTAT_BASE}/channels/posts", params=params2
+                ) as resp2:
+                    data2 = await resp2.json()
+
+                if data2.get("status") != "ok":
+                    break
+
+                items = data2.get("response", {}).get("items", [])
+                if not items:
+                    break
+
+                for item in items:
+                    link = item.get("link", "")
+                    # Совпадение по post_id в конце ссылки
+                    if link.endswith(f"/{post_id}") or link.endswith(f"/{post_id_int}"):
+                        return _parse_item(post_url, item)
+
+                # Если дошли до постов старше нужного — прекращаем поиск
+                oldest = items[-1].get("link", "")
+                oldest_id_match = re.search(r"/(\d+)$", oldest)
+                if oldest_id_match and int(oldest_id_match.group(1)) < post_id_int:
+                    break
+
+            return TGStatPostStats(post_url=post_url, error="post_not_found_in_channel")
+
+    return TGStatPostStats(
+        post_url=post_url,
+        error=data.get("error", "TGStat API error"),
     )
