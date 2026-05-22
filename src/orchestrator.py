@@ -7,7 +7,7 @@ import asyncio
 import logging
 from src.parsers.mediaplan import MediaPlan, Post
 import os
-from src.platforms import vk, telemetr, tgstat, hikerapi, pyrogram_tg
+from src.platforms import vk, telemetr, tgstat, hikerapi, pyrogram_tg, youtube
 from src.analyzer.openai_analyzer import analyze_campaign
 
 # Pyrogram доступен если есть файл сессии ИЛИ string session в переменной окружения
@@ -133,6 +133,31 @@ async def _fetch_stats_for_post(post: Post) -> dict:
                     "posts_analyzed": result.channel_avg.posts_analyzed,
                 }
             logger.info(f"HikerAPI done: views={result.views}, likes={result.likes}, error={result.error}")
+
+        elif post.platform == "youtube" and post.post_url:
+            logger.info(f"YouTube: fetching {post.post_url}")
+            result = await youtube.get_post_stats(post.post_url)
+            if result.channel_title and post.name.startswith("http"):
+                post.name = result.channel_title
+            stats = {
+                "views": result.views,
+                "likes": result.likes,
+                "comments": result.comments,
+                "error": result.error,
+            }
+            if result.channel_avg and result.channel_avg.posts_analyzed > 0:
+                stats["channel_avg"] = {
+                    "avg_views": result.channel_avg.avg_views,
+                    "avg_likes": result.channel_avg.avg_likes,
+                    "avg_comments": result.channel_avg.avg_comments,
+                    "posts_analyzed": result.channel_avg.posts_analyzed,
+                }
+            logger.info(f"YouTube done: views={result.views}, channel={result.channel_title}, error={result.error}")
+
+        elif post.platform == "tiktok" and post.post_url:
+            # TikTok — пока без API, используем факт из МП если есть
+            stats = {"error": "TikTok API в разработке — используй факт из МП"}
+            logger.info(f"TikTok: no API yet for {post.post_url}")
 
         else:
             stats = {"error": f"Платформа {post.platform!r} не поддерживается или нет ссылки на пост"}
@@ -339,6 +364,10 @@ def _detect_platform(url: str) -> str:
         return "telegram"
     if "instagram.com" in url:
         return "instagram"
+    if "youtube.com" in url or "youtu.be" in url:
+        return "youtube"
+    if "tiktok.com" in url or "vt.tiktok.com" in url:
+        return "tiktok"
     if "x.com" in url or "twitter.com" in url:
         return "twitter"
     return "unknown"
