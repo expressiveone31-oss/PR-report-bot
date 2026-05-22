@@ -130,6 +130,18 @@ def parse_target_mp(content: str, project_name: str = "") -> TargetMediaPlan:
     header1 = rows[header_row_idx]      # группы колонок
     header2 = rows[header_row_idx + 1]  # прогноз/факт подзаголовки
 
+    # Определяем индекс колонки таргета — последняя непустая колонка перед "Стоимость"
+    # В МП с 2 инфо-колонками (Каналы, Таргеты) — COL_TARGET=1
+    # В МП с 3 инфо-колонками (Каналы, Оптимизации, Таргеты) — COL_TARGET=2
+    COL_CHANNEL = 0
+    COL_TARGET = 1
+    for i, cell in enumerate(header1[1:], 1):
+        c = cell.strip().lower()
+        if any(kw in c for kw in ("стоимость", "показы", "cpm", "охват", "переход")):
+            break
+        if c:
+            COL_TARGET = i
+
     # Строим маппинг колонок по заголовкам
     # Идём по header1, запоминаем текущую группу
     col_map = {}
@@ -154,10 +166,6 @@ def parse_target_mp(content: str, project_name: str = "") -> TargetMediaPlan:
 
     def find_cols(group_kw: str) -> list[int]:
         return [idx for idx, key in col_map.items() if group_kw in key.split("|")[0]]
-
-    # Колонки
-    COL_CHANNEL = 0
-    COL_TARGET = 1
 
     col_cost_plan  = find_col("стоимость", "прогноз")
     col_cost_fact  = find_col("стоимость", "факт")
@@ -230,7 +238,7 @@ def parse_target_mp(content: str, project_name: str = "") -> TargetMediaPlan:
 
         target = get(row, COL_TARGET)
 
-        # Пропускаем строки без данных
+        # Пропускаем строки без фактических данных — прогнозные МП не обрабатываем
         cost_fact_raw = get(row, col_cost_fact)
         reach_fact_raw = get(row, col_reach_fact)
         if not cost_fact_raw and not reach_fact_raw:

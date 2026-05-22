@@ -167,7 +167,11 @@ async def got_csv_mediaplan(message: Message, state: FSMContext) -> None:
             return
 
         if not target_mp.channel_rows:
-            await message.answer("Не нашёл данных в МП. Проверь файл.", parse_mode=None)
+            await message.answer(
+                "Не нашёл фактических данных в МП — похоже это прогнозный план.\n\n"
+                "Скинь МП с заполненными колонками «Факт».",
+                parse_mode=None,
+            )
             return
 
         summary_lines = [
