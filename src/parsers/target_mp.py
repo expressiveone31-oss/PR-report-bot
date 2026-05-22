@@ -46,6 +46,9 @@ class TargetRow:
     bounce_rate: Optional[float] = None      # % отказа (число, не строка)
     time_on_site: Optional[str] = None       # "1:20", "0:07" и т.д.
 
+    participants: Optional[float] = None     # участники / целевые действия
+    cpa: Optional[float] = None             # стоимость участника/действия
+
     is_total: bool = False
 
 
@@ -183,30 +186,30 @@ def parse_target_mp(content: str, project_name: str = "") -> TargetMediaPlan:
     col_cpc_fact             = cpc_cols[1] if len(cpc_cols) > 1 else None
     col_cpc_fact_metrika     = cpc_cols[2] if len(cpc_cols) > 2 else None
 
-    # % отказа и время на сайте — только факт, ищем по названию
-    col_bounce = None
-    col_time   = None
-    for i, cell in enumerate(header1):
-        c = cell.strip().lower()
-        if "отказ" in c:
-            col_bounce = i
-        if "время" in c:
-            col_time = i
-    # Если не нашли в header1, ищем в header2
-    if col_bounce is None:
-        for i, cell in enumerate(header2):
-            if "отказ" in cell.strip().lower():
+    # % отказа, время на сайте, участники, CPA — только факт, ищем по названию
+    col_bounce       = None
+    col_time         = None
+    col_participants = None
+    col_cpa          = None
+
+    for header in (header1, header2):
+        for i, cell in enumerate(header):
+            c = cell.strip().lower()
+            if "отказ" in c and col_bounce is None:
                 col_bounce = i
-    if col_time is None:
-        for i, cell in enumerate(header2):
-            if "время" in cell.strip().lower():
+            if "время" in c and col_time is None:
                 col_time = i
+            if ("участник" in c or "kpi" in c) and col_participants is None:
+                col_participants = i
+            if c == "cpa" and col_cpa is None:
+                col_cpa = i
 
     logger.info(
         f"target_mp columns: cost={col_cost_plan}/{col_cost_fact}, "
         f"reach={col_reach_plan}/{col_reach_fact}, "
         f"clicks={col_clicks_plan}/{col_clicks_fact}/{col_clicks_fact_metrika}, "
-        f"bounce={col_bounce}, time={col_time}"
+        f"bounce={col_bounce}, time={col_time}, "
+        f"participants={col_participants}, cpa={col_cpa}"
     )
 
     def get(row: list[str], idx: Optional[int]) -> str:
@@ -261,6 +264,8 @@ def parse_target_mp(content: str, project_name: str = "") -> TargetMediaPlan:
             cpc_fact_metrika=_parse_num(get(row, col_cpc_fact_metrika)),
             bounce_rate=bounce,
             time_on_site=get(row, col_time) or None,
+            participants=_parse_num(get(row, col_participants)),
+            cpa=_parse_num(get(row, col_cpa)),
             is_total=is_total,
         ))
 
