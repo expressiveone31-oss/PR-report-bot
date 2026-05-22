@@ -147,18 +147,18 @@ async def got_csv_mediaplan(message: Message, state: FSMContext) -> None:
     total_budget = mp.total_budget
 
     summary_lines = [
-        f"Проект: *{project_name}*",
-        f"Paid-постов: *{paid_count}*  |  Органика: *{organic_count}* постов",
-        f"Плановый охват: *{total_plan:,}*",
-        f"Бюджет размещений: *{total_budget:,.0f} ₽*",
+        f"Проект: {project_name}",
+        f"Paid-постов: {paid_count}  |  Органика: {organic_count} постов",
+        f"Плановый охват: {total_plan:,}",
+        f"Бюджет размещений: {total_budget:,.0f} руб.",
         "",
         "Paid-посты из МП:",
     ]
     for p in mp.paid_posts:
         summary_lines.append(f"• {p.name} — план {p.planned_reach:,} — {p.post_url}")
 
-    await message.answer("\n".join(summary_lines))
-    await message.answer("Иду за данными через API — это займёт до минуты...")
+    await message.answer("\n".join(summary_lines), parse_mode=None)
+    await message.answer("Иду за данными через API — это займёт до минуты...", parse_mode=None)
 
     try:
         result = await process_mediaplan(mp, project_name=project_name)
