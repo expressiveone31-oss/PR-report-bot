@@ -43,6 +43,32 @@ class ReportStates(StatesGroup):
     waiting_project_name  = State()
 
 
+def _detect_mp_type(content: str) -> str:
+    """
+    Определяет тип МП: 'target' или 'posev'.
+    Таргет — есть колонки CPM, % отказа, CPC, нет ссылок на публикации.
+    Посев — есть ссылки на публикации t.me/vk.com/instagram.com.
+    """
+    content_lower = content.lower()
+    # Признаки таргет-МП
+    target_signals = sum([
+        "cpm" in content_lower,
+        "% отказа" in content_lower or "отказ" in content_lower,
+        "cpc" in content_lower,
+        "показы" in content_lower,
+        "переходы" in content_lower,
+    ])
+    # Признаки посевного МП
+    posev_signals = sum([
+        "t.me/" in content_lower,
+        "vk.com/wall" in content_lower or "vk.ru/wall" in content_lower,
+        "instagram.com/p/" in content_lower or "instagram.com/reel/" in content_lower,
+        "ссылка на публикацию" in content_lower,
+        "охват (факт)" in content_lower,
+    ])
+    return "target" if target_signals >= 3 and target_signals > posev_signals else "posev"
+
+
 def extract_links(text: str) -> list[str]:
     """Вытаскивает все http-ссылки из текста."""
     return re.findall(r'https?://\S+', text)
@@ -115,7 +141,7 @@ async def got_csv_mediaplan(message: Message, state: FSMContext) -> None:
         await message.answer("Нужен файл в формате CSV. Попробуй снова или напиши ссылки вручную.")
         return
 
-    await message.answer("Читаю медиаплан...")
+    await message.answer("Читаю медиаплан...", parse_mode=None)
 
     file = await bot.get_file(doc.file_id)
     file_bytes = await bot.download_file(file.file_path)
@@ -124,23 +150,70 @@ async def got_csv_mediaplan(message: Message, state: FSMContext) -> None:
     # Название проекта из имени файла
     project_name = os.path.splitext(doc.file_name)[0].strip()
 
+    # Автодетекция типа МП: таргет или посев
+    mp_type = _detect_mp_type(content)
+    logger.info(f"MP type detected: {mp_type}")
+
+    if mp_type == "target":
+        # Таргет/перфоманс МП — без API-запросов
+        from src.parsers.target_mp import parse_target_mp
+        from src.analyzer.target_analyzer import analyze_target_campaign
+
+        try:
+            target_mp = parse_target_mp(content, project_name=project_name)
+        except Exception as e:
+            logger.error(f"Target MP parse error: {e}", exc_info=True)
+            await message.answer(f"Не удалось разобрать таргет-МП: {e}", parse_mode=None)
+            return
+
+        if not target_mp.channel_rows:
+            await message.answer("Не нашёл данных в МП. Проверь файл.", parse_mode=None)
+            return
+
+        summary_lines = [
+            f"Проект: {project_name}",
+            f"Тип: таргет/перфоманс кампания",
+            f"Каналов: {len(target_mp.channel_rows)}",
+            "",
+            "Каналы:",
+        ]
+        for r in target_mp.channel_rows:
+            summary_lines.append(f"• {r.channel}" + (f" / {r.target[:50]}" if r.target else ""))
+
+        await message.answer("\n".join(summary_lines), parse_mode=None)
+        await message.answer("Формирую отчёт...", parse_mode=None)
+
+        try:
+            result = await analyze_target_campaign(target_mp)
+        except Exception as e:
+            logger.error(f"Target analysis error: {e}", exc_info=True)
+            await message.answer("Ошибка при анализе. Попробуй ещё раз (/start).", parse_mode=None)
+            return
+
+        await state.clear()
+        for chunk in send_long(result):
+            await message.answer(chunk, parse_mode=None)
+        return
+
+    # Посевной МП — с API-запросами
     try:
         from src.parsers.universal_mp import parse_mediaplan_auto
         mp, schema = await parse_mediaplan_auto(content)
     except Exception as e:
         logger.error(f"MP parse error: {e}", exc_info=True)
         await message.answer(
-            f"Не удалось разобрать МП: {e}\n\nПопробуй скинуть ссылки вручную — напиши /start"
+            f"Не удалось разобрать МП: {e}\n\nПопробуй скинуть ссылки вручную — напиши /start",
+            parse_mode=None,
         )
         return
 
     if not mp.paid_posts:
         await message.answer(
-            "Не нашёл paid-постов в МП. Проверь файл или скинь ссылки вручную (/start)."
+            "Не нашёл paid-постов в МП. Проверь файл или скинь ссылки вручную (/start).",
+            parse_mode=None,
         )
         return
 
-    # Показываем что нашли — для проверки перед запуском
     paid_count = len(mp.paid_posts)
     organic_count = len(mp.organic_posts)
     total_plan = mp.total_planned_reach
@@ -164,7 +237,7 @@ async def got_csv_mediaplan(message: Message, state: FSMContext) -> None:
         result = await process_mediaplan(mp, project_name=project_name)
     except Exception as e:
         logger.error(f"Processing error: {e}", exc_info=True)
-        await message.answer("Ошибка при сборе данных. Попробуй ещё раз (/start).")
+        await message.answer("Ошибка при сборе данных. Попробуй ещё раз (/start).", parse_mode=None)
         return
 
     await state.clear()
