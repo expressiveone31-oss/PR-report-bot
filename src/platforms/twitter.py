@@ -1,0 +1,165 @@
+"""
+Twitter/X API модуль через scraper.tech (RapidAPI).
+Host: twitter-api45.p.rapidapi.com
+
+Получает статистику твита по ссылке вида:
+  https://x.com/user/status/1671370010743263233
+  https://twitter.com/user/status/1671370010743263233
+"""
+
+import re
+import logging
+import aiohttp
+from dataclasses import dataclass, field
+from typing import Optional
+from src.config import TIKTOK_RAPIDAPI_KEY  # тот же RapidAPI ключ
+
+logger = logging.getLogger(__name__)
+
+TWITTER_HOST = "twitter-api45.p.rapidapi.com"
+TWITTER_BASE = f"https://{TWITTER_HOST}"
+HEADERS = {
+    "x-rapidapi-key": TIKTOK_RAPIDAPI_KEY,
+    "x-rapidapi-host": TWITTER_HOST,
+    "Content-Type": "application/json",
+}
+
+
+@dataclass
+class ChannelAverage:
+    avg_views: Optional[float] = None
+    avg_likes: Optional[float] = None
+    avg_retweets: Optional[float] = None
+    avg_replies: Optional[float] = None
+    posts_analyzed: int = 0
+
+
+@dataclass
+class TwitterPostStats:
+    post_url: str
+    tweet_id: Optional[str] = None
+    views: Optional[int] = None
+    likes: Optional[int] = None
+    retweets: Optional[int] = None
+    replies: Optional[int] = None
+    bookmarks: Optional[int] = None
+    channel_title: Optional[str] = None
+    channel_username: Optional[str] = None
+    channel_avg: Optional[ChannelAverage] = None
+    error: Optional[str] = None
+
+
+def _extract_tweet_id(url: str) -> Optional[str]:
+    """Извлекает tweet_id из ссылки x.com/user/status/123456."""
+    match = re.search(r"/status/(\d+)", url)
+    return match.group(1) if match else None
+
+
+async def _get_channel_average(
+    session: aiohttp.ClientSession,
+    username: str,
+    exclude_tweet_id: str,
+    count: int = 20,
+) -> ChannelAverage:
+    """Берёт последние N твитов канала и считает средние."""
+    try:
+        params = {"screenname": username, "count": count}
+        async with session.get(
+            f"{TWITTER_BASE}/timeline.php",
+            headers=HEADERS,
+            params=params,
+        ) as resp:
+            data = await resp.json()
+
+        tweets = data.get("timeline", [])
+        tweets = [t for t in tweets if str(t.get("tweet_id", "")) != exclude_tweet_id]
+        if not tweets:
+            return ChannelAverage()
+
+        def safe_int(val) -> int:
+            try:
+                return int(val or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        views_list    = [safe_int(t.get("views")) for t in tweets]
+        likes_list    = [safe_int(t.get("favorites")) for t in tweets]
+        retweets_list = [safe_int(t.get("retweets")) for t in tweets]
+        replies_list  = [safe_int(t.get("replies")) for t in tweets]
+
+        n = len(tweets)
+        return ChannelAverage(
+            avg_views=round(sum(views_list) / n),
+            avg_likes=round(sum(likes_list) / n),
+            avg_retweets=round(sum(retweets_list) / n),
+            avg_replies=round(sum(replies_list) / n),
+            posts_analyzed=n,
+        )
+    except Exception as e:
+        logger.warning(f"Twitter channel average error for {username}: {e}")
+        return ChannelAverage()
+
+
+async def get_post_stats(post_url: str) -> TwitterPostStats:
+    tweet_id = _extract_tweet_id(post_url)
+    if not tweet_id:
+        return TwitterPostStats(post_url=post_url, error="Не удалось извлечь tweet_id из ссылки")
+
+    if not TIKTOK_RAPIDAPI_KEY:
+        return TwitterPostStats(post_url=post_url, error="TIKTOK_RAPIDAPI_KEY не задан")
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            f"{TWITTER_BASE}/tweet.php",
+            headers=HEADERS,
+            params={"id": tweet_id},
+        ) as resp:
+            data = await resp.json()
+
+        if data.get("status") == "error" or not data.get("tweet_id"):
+            return TwitterPostStats(
+                post_url=post_url,
+                tweet_id=tweet_id,
+                error=data.get("error", "Твит не найден"),
+            )
+
+        def safe_int(val) -> Optional[int]:
+            try:
+                v = int(val or 0)
+                return v if v > 0 else None
+            except (TypeError, ValueError):
+                return None
+
+        views     = safe_int(data.get("views"))
+        likes     = safe_int(data.get("favorites"))
+        retweets  = safe_int(data.get("retweets"))
+        replies   = safe_int(data.get("replies"))
+        bookmarks = safe_int(data.get("bookmarks"))
+
+        # Автор
+        author = data.get("author", {})
+        channel_title    = author.get("name")
+        channel_username = author.get("screen_name") or author.get("screenname")
+
+        # Средние по каналу
+        channel_avg = ChannelAverage()
+        if channel_username:
+            channel_avg = await _get_channel_average(session, channel_username, tweet_id)
+
+        logger.info(
+            f"Twitter done: tweet_id={tweet_id}, views={views}, "
+            f"likes={likes}, retweets={retweets}, channel={channel_title}"
+        )
+
+    return TwitterPostStats(
+        post_url=post_url,
+        tweet_id=tweet_id,
+        views=views,
+        likes=likes,
+        retweets=retweets,
+        replies=replies,
+        bookmarks=bookmarks,
+        channel_title=channel_title,
+        channel_username=channel_username,
+        channel_avg=channel_avg,
+    )

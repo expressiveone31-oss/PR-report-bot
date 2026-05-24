@@ -16,4 +16,5 @@ PYROGRAM_API_HASH = os.getenv("PYROGRAM_API_HASH", "")
 PYROGRAM_SESSION_STRING = os.getenv("SESSION_STRING", "")
 
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "")
-TIKTOK_RAPIDAPI_KEY = os.getenv("TIKTOK_RAPIDAPI_KEY", "")
+RAPIDAPI_KEY = os.getenv("TIKTOK_RAPIDAPI_KEY", "")  # универсальный RapidAPI ключ
+TIKTOK_RAPIDAPI_KEY = RAPIDAPI_KEY  # обратная совместимость

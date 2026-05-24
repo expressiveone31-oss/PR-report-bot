@@ -7,7 +7,7 @@ import asyncio
 import logging
 from src.parsers.mediaplan import MediaPlan, Post
 import os
-from src.platforms import vk, telemetr, tgstat, hikerapi, pyrogram_tg, youtube, tiktok
+from src.platforms import vk, telemetr, tgstat, hikerapi, pyrogram_tg, youtube, tiktok, twitter
 from src.analyzer.openai_analyzer import analyze_campaign
 
 # Pyrogram доступен если есть файл сессии ИЛИ string session в переменной окружения
@@ -176,6 +176,28 @@ async def _fetch_stats_for_post(post: Post) -> dict:
                     "posts_analyzed": result.channel_avg.posts_analyzed,
                 }
             logger.info(f"TikTok done: views={result.views}, channel={result.channel_title}, error={result.error}")
+
+        elif post.platform == "twitter" and post.post_url:
+            logger.info(f"Twitter: fetching {post.post_url}")
+            result = await twitter.get_post_stats(post.post_url)
+            if result.channel_title and post.name.startswith("http"):
+                post.name = result.channel_title
+            stats = {
+                "views": result.views,
+                "likes": result.likes,
+                "reposts": result.retweets,
+                "comments": result.replies,
+                "error": result.error,
+            }
+            if result.channel_avg and result.channel_avg.posts_analyzed > 0:
+                stats["channel_avg"] = {
+                    "avg_views": result.channel_avg.avg_views,
+                    "avg_likes": result.channel_avg.avg_likes,
+                    "avg_reposts": result.channel_avg.avg_retweets,
+                    "avg_comments": result.channel_avg.avg_replies,
+                    "posts_analyzed": result.channel_avg.posts_analyzed,
+                }
+            logger.info(f"Twitter done: views={result.views}, likes={result.likes}, error={result.error}")
 
         else:
             stats = {"error": f"Платформа {post.platform!r} не поддерживается или нет ссылки на пост"}
