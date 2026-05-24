@@ -131,22 +131,38 @@ def _format_post_data(post_data: dict, post_idx: int) -> str:
         if stats.get("channel_subscribers") is not None:
             lines.append(f"  Подписчики канала: {stats['channel_subscribers']:,}")
         # Норма канала — реальные средние из API, строго по каждой метрике отдельно
+        # Ограничиваем выбросы: среднее не может быть больше 10× медианы просмотров
         channel_avg = stats.get("channel_avg", {})
         if channel_avg:
             n = channel_avg.get("posts_analyzed", 0)
             label = f"(среднее по последним {n} постам канала)"
+            avg_views = channel_avg.get("avg_views") or 0
+
+            def _cap(val, cap_multiplier=20):
+                """Обрезаем аномальные значения: не более cap_multiplier × avg_views."""
+                if val is None:
+                    return None
+                if avg_views and avg_views > 0 and val > avg_views * cap_multiplier:
+                    return None  # явный выброс — не показываем
+                return val
+
             if channel_avg.get("avg_views"):
                 lines.append(f"  Норма канала — просмотры: {channel_avg['avg_views']:,} {label}")
-            if channel_avg.get("avg_likes"):
-                lines.append(f"  Норма канала — лайки: {channel_avg['avg_likes']:,} {label}")
-            if channel_avg.get("avg_reposts"):
-                lines.append(f"  Норма канала — репосты: {channel_avg['avg_reposts']:,} {label}")
-            if channel_avg.get("avg_forwards"):
-                lines.append(f"  Норма канала — пересылки: {channel_avg['avg_forwards']:,} {label}")
-            if channel_avg.get("avg_comments"):
-                lines.append(f"  Норма канала — комментарии: {channel_avg['avg_comments']:,} {label}")
-            if channel_avg.get("avg_saves"):
-                lines.append(f"  Норма канала — сохранения: {channel_avg['avg_saves']:,} {label}")
+            v = _cap(channel_avg.get("avg_likes"))
+            if v:
+                lines.append(f"  Норма канала — лайки: {v:,} {label}")
+            v = _cap(channel_avg.get("avg_reposts"))
+            if v:
+                lines.append(f"  Норма канала — репосты: {v:,} {label}")
+            v = _cap(channel_avg.get("avg_forwards"))
+            if v:
+                lines.append(f"  Норма канала — пересылки: {v:,} {label}")
+            v = _cap(channel_avg.get("avg_comments"))
+            if v:
+                lines.append(f"  Норма канала — комментарии: {v:,} {label}")
+            v = _cap(channel_avg.get("avg_saves"))
+            if v:
+                lines.append(f"  Норма канала — сохранения: {v:,} {label}")
 
         # Комментарии — только если их достаточно для вывода
         comments_count = stats.get("comments", 0) or 0
@@ -215,7 +231,93 @@ async def analyze_campaign(
     planned_cpv = placement_budget / total_planned_reach if total_planned_reach > 0 else 0
     cpv_ratio = planned_cpv / actual_cpv if actual_cpv > 0 else 0
     reach_ratio = total_actual_reach / total_planned_reach if total_planned_reach > 0 else 0
-    plan_exceeded = total_actual_reach >= total_planned_reach  # выполнен ли план
+    plan_exceeded = total_actual_reach >= total_planned_reach
+
+    def _fmt_ratio_ru(r: float) -> str:
+        s = f"{r:.1f}".replace(".", ",")
+        return f"в {s} раза"
+
+    def _fmt_money(v: float) -> str:
+        return f"{v:,.2f}".replace(",", " ").replace(".", ",")
+
+    def _fmt_cpv_diff(v: float) -> str:
+        if v < 1:
+            return f"{round(v * 100)} копеек"
+        return f"{_fmt_money(v)} ₽"
+
+    def _build_section1() -> str:
+        reach_diff = total_actual_reach - total_planned_reach
+        reach_abs = abs(reach_diff)
+        reach_factor = max(reach_ratio, 1 / reach_ratio if reach_ratio > 0 else 0)
+
+        # Строка про охват
+        if total_planned_reach <= 0:
+            reach_line = f"• Фактический охват по проекту составил {total_actual_reach:,} просмотров"
+        elif reach_factor < 1.1:
+            reach_line = (
+                f"• Фактический охват равен запланированному: {total_actual_reach:,} просмотров "
+                f"при плане {total_planned_reach:,}"
+            )
+        elif reach_ratio < 1 and reach_factor < 1.3:
+            reach_line = (
+                f"• Фактический охват составил {total_actual_reach:,} просмотров при плане "
+                f"{total_planned_reach:,} — на {reach_abs:,} просмотров меньше плана"
+            )
+        elif reach_ratio >= 1 and reach_factor < 1.3:
+            reach_line = (
+                f"• Фактический охват составил {total_actual_reach:,} просмотров при плане "
+                f"{total_planned_reach:,} — на {reach_abs:,} просмотров больше плана"
+            )
+        elif reach_ratio < 1:
+            pct = total_actual_reach / total_planned_reach * 100
+            reach_line = (
+                f"• Фактический охват составил {total_actual_reach:,} просмотров при плане "
+                f"{total_planned_reach:,} — выполнение плана на {pct:.0f}%"
+            )
+        else:
+            reach_line = (
+                f"• Вместо {total_planned_reach:,} просмотров у нас {total_actual_reach:,} просмотров! "
+                f"Это {_fmt_ratio_ru(reach_ratio)} выше планируемого охвата!"
+            )
+
+        # Строка про CPV
+        cpv_abs = abs(actual_cpv - planned_cpv)
+        cpv_factor = max(cpv_ratio, 1 / cpv_ratio if cpv_ratio > 0 else 0)
+
+        if planned_cpv <= 0 or actual_cpv <= 0:
+            cpv_line = f"• Итоговый CPV по проекту: {_fmt_money(actual_cpv)} ₽"
+        elif cpv_factor < 1.1:
+            cpv_line = (
+                f"• Итоговый CPV по проекту соответствует плану: {_fmt_money(actual_cpv)} ₽ "
+                f"при плановом {_fmt_money(planned_cpv)} ₽"
+            )
+        elif cpv_factor < 1.3:
+            direction = "меньше" if actual_cpv < planned_cpv else "больше"
+            cpv_line = (
+                f"• Итоговый CPV по проекту: {_fmt_money(actual_cpv)} ₽ при плановом "
+                f"{_fmt_money(planned_cpv)} ₽ — на {_fmt_cpv_diff(cpv_abs)} {direction} плана"
+            )
+        elif actual_cpv < planned_cpv:
+            cpv_line = (
+                f"• Итоговый CPV по проекту: {_fmt_money(actual_cpv)} ₽ при плановом "
+                f"{_fmt_money(planned_cpv)} ₽ — {_fmt_ratio_ru(planned_cpv / actual_cpv)} ниже"
+            )
+        else:
+            cpv_line = (
+                f"• Итоговый CPV по проекту: {_fmt_money(actual_cpv)} ₽ при плановом "
+                f"{_fmt_money(planned_cpv)} ₽ — {_fmt_ratio_ru(actual_cpv / planned_cpv)} выше плана"
+            )
+
+        lines = [reach_line, cpv_line]
+        if reach_diff > 0:
+            lines.append(
+                f"• Виральный охват по проекту составил {reach_diff:,} просмотров, "
+                f"что эквивалентно экономии {total_savings:,.0f} рублей"
+            )
+        lines.append(f"• Суммарный органический охват — {total_organic_reach:,} просмотров")
+        return "\n".join(lines)
+
+    section1_text = _build_section1()
 
     # --- Предварительный расчёт кандидатов для раздела 2 ---
     # Группируем по URL: один пост — одна строка с перечислением всех превышений.
@@ -312,29 +414,21 @@ async def analyze_campaign(
     viral_reach = total_actual_reach - total_planned_reach
     user_message = f"""Проект: {project_name}
 
-ОБЩИЕ ЦИФРЫ КАМПАНИИ:
-- Плановый охват: {total_planned_reach:,}
-- Фактический охват (все публикации): {total_actual_reach:,}
-- План {"ВЫПОЛНЕН" if plan_exceeded else "НЕ ВЫПОЛНЕН"}: факт {"≥" if plan_exceeded else "<"} плана
-- Множитель {"перевыполнения" if plan_exceeded else "выполнения"}: {reach_ratio:.1f}x
-- Бюджет размещений: {placement_budget:,.0f} ₽
-- Факт CPV: {actual_cpv:.2f} ₽
-- Плановый CPV: {planned_cpv:.2f} ₽
-- CPV {"ниже" if actual_cpv <= planned_cpv else "выше"} плана в: {max(cpv_ratio, 1/cpv_ratio if cpv_ratio > 0 else 0):.1f} раза
-- Виральный охват (факт − план): {viral_reach:,} просмотров {"(положительный — план перевыполнен)" if viral_reach >= 0 else "(отрицательный — план НЕ выполнен, не упоминай экономию)"}
-- Расчётная экономия: {total_savings:,.0f} ₽ {"(только если виральный охват положительный)" if viral_reach >= 0 else "(не указывай — план не выполнен)"}
-- Органический охват: {total_organic_reach:,} просмотров
-
 ПУБЛИКАЦИИ:
 {posts_text}
 
 ССЫЛКИ НА ПОСТЫ (копируй дословно, не изменяй ни символ):
 {links_map}
 
+ГОТОВЫЕ СТРОКИ ДЛЯ РАЗДЕЛА 1 (вставь их дословно, не пересчитывай):
+{section1_text}
+
 ГОТОВЫЕ СТРОКИ ДЛЯ РАЗДЕЛА 2 (вставь их дословно, не перефразируй, не сокращай список):
 {superresults_text}
 
 Сформируй отчёт строго в трёх разделах как указано в инструкции.
+Раздел 1: используй строки из блока "ГОТОВЫЕ СТРОКИ ДЛЯ РАЗДЕЛА 1" дословно — не пересчитывай CPV, охват и экономию сам.
+Раздел 2: используй строки из блока "ГОТОВЫЕ СТРОКИ ДЛЯ РАЗДЕЛА 2" дословно.
 
 ОФОРМЛЕНИЕ — строго такое, без линий и символов-разделителей:
 
@@ -353,9 +447,7 @@ async def analyze_campaign(
 
 АНАЛИТИКА ПО ЛАЙКАМ, КОММЕНТАРИЯМ И РЕПОСТАМ
 
-текст
-
-Раздел 2: используй строки из блока "ГОТОВЫЕ СТРОКИ ДЛЯ РАЗДЕЛА 2" дословно."""
+текст"""
 
     # Запускаем акценты и анализ комментариев параллельно
     accent_coro = client.chat.completions.create(
