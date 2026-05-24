@@ -7,7 +7,7 @@ import asyncio
 import logging
 from src.parsers.mediaplan import MediaPlan, Post
 import os
-from src.platforms import vk, telemetr, tgstat, hikerapi, pyrogram_tg, youtube
+from src.platforms import vk, telemetr, tgstat, hikerapi, pyrogram_tg, youtube, tiktok
 from src.analyzer.openai_analyzer import analyze_campaign
 
 # Pyrogram доступен если есть файл сессии ИЛИ string session в переменной окружения
@@ -155,9 +155,27 @@ async def _fetch_stats_for_post(post: Post) -> dict:
             logger.info(f"YouTube done: views={result.views}, channel={result.channel_title}, error={result.error}")
 
         elif post.platform == "tiktok" and post.post_url:
-            # TikTok — пока без API, используем факт из МП если есть
-            stats = {"error": "TikTok API в разработке — используй факт из МП"}
-            logger.info(f"TikTok: no API yet for {post.post_url}")
+            logger.info(f"TikTok: fetching {post.post_url}")
+            result = await tiktok.get_post_stats(post.post_url, fetch_comments=PYROGRAM_AVAILABLE)
+            if result.channel_title and post.name.startswith("http"):
+                post.name = result.channel_title
+            stats = {
+                "views": result.views,
+                "likes": result.likes,
+                "comments": result.comments,
+                "reposts": result.shares,
+                "top_comments": result.top_comments,
+                "error": result.error,
+            }
+            if result.channel_avg and result.channel_avg.posts_analyzed > 0:
+                stats["channel_avg"] = {
+                    "avg_views": result.channel_avg.avg_views,
+                    "avg_likes": result.channel_avg.avg_likes,
+                    "avg_comments": result.channel_avg.avg_comments,
+                    "avg_reposts": result.channel_avg.avg_shares,
+                    "posts_analyzed": result.channel_avg.posts_analyzed,
+                }
+            logger.info(f"TikTok done: views={result.views}, channel={result.channel_title}, error={result.error}")
 
         else:
             stats = {"error": f"Платформа {post.platform!r} не поддерживается или нет ссылки на пост"}
