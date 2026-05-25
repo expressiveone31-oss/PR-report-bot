@@ -122,20 +122,28 @@ def send_long(text: str, chunk_size: int = 4000) -> list[str]:
 
 @dp.message(Command("testcomments"))
 async def cmd_test_comments(message: Message, state: FSMContext) -> None:
-    """Временная команда для тестирования telegram92 API."""
+    """Временная команда для тестирования telegram92 API с разными паузами."""
+    import time
     from src.platforms.telegram_comments import get_post_comments
     test_urls = [
-        "https://t.me/movierls/20410",   # 8 комментов — работал
-        "https://t.me/nmshhub/56444",    # 11 комментов — не работал
+        "https://t.me/movierls/20410",
+        "https://t.me/nmshhub/56444",
+        "https://t.me/topor/50101",
     ]
-    for url in test_urls:
-        result = await get_post_comments(url, limit=5)
+    for i, url in enumerate(test_urls):
+        if i > 0:
+            pause = 10  # 10 секунд между запросами для теста
+            await message.answer(f"Пауза {pause} сек перед следующим запросом...", parse_mode=None)
+            await asyncio.sleep(pause)
+        t0 = time.time()
+        result = await get_post_comments(url, limit=3)
+        elapsed = time.time() - t0
         if result.error:
-            await message.answer(f"❌ {url}\nОшибка: {result.error}", parse_mode=None)
+            await message.answer(f"❌ ({elapsed:.1f}s) {url}\nОшибка: {result.error}", parse_mode=None)
         else:
-            lines = [f"✓ {url}\nПолучено: {len(result.top_comments)}, всего: {result.total_count}"]
-            for i, c in enumerate(result.top_comments, 1):
-                lines.append(f"{i}. {c[:150]}")
+            lines = [f"✓ ({elapsed:.1f}s) {url}\nПолучено: {len(result.top_comments)}, всего: {result.total_count}"]
+            for j, c in enumerate(result.top_comments, 1):
+                lines.append(f"{j}. {c[:100]}")
             await message.answer("\n".join(lines), parse_mode=None)
 
 
