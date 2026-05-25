@@ -7,7 +7,7 @@ import asyncio
 import logging
 from src.parsers.mediaplan import MediaPlan, Post
 import os
-from src.platforms import vk, telemetr, tgstat, hikerapi, pyrogram_tg, youtube, tiktok, twitter
+from src.platforms import vk, telemetr, tgstat, hikerapi, pyrogram_tg, youtube, tiktok, twitter, telegram_comments
 from src.analyzer.openai_analyzer import analyze_campaign
 
 # Pyrogram доступен если есть файл сессии ИЛИ string session в переменной окружения
@@ -103,15 +103,22 @@ async def _fetch_stats_for_post(post: Post) -> dict:
             else:
                 logger.info(f"Telemetr wins or TGStat failed: telemetr={telemetr_views}, tgstat={tgstat_views}, tgstat_err={fallback.error}")
 
-            # Если есть комментарии и Pyrogram авторизован — парсим тексты
-            # Минимальный порог: 5+ комментариев, иначе не стоит парсить
+            # Парсим тексты комментариев.
+            # Приоритет: telegram92 API (работает везде) → Pyrogram (только локально)
+            # Минимальный порог: 5+ комментариев
             comments_actual = stats.get("comments") or 0
-            if PYROGRAM_AVAILABLE and comments_actual >= 5:
-                logger.info(f"Pyrogram: fetching comments for {post.post_url}")
-                tg_comments = await pyrogram_tg.get_post_comments(post.post_url, limit=5)  # type: ignore
+            if comments_actual >= 5:
+                tg_comments = await telegram_comments.get_post_comments(post.post_url, limit=5)
                 if tg_comments.top_comments:
                     stats["top_comments"] = tg_comments.top_comments
-                    logger.info(f"Pyrogram done: {len(tg_comments.top_comments)} comments")
+                    logger.info(f"telegram92 comments done: {len(tg_comments.top_comments)} for {post.post_url}")
+                elif PYROGRAM_AVAILABLE:
+                    # Fallback на Pyrogram если telegram92 не сработал
+                    logger.info(f"Pyrogram fallback: fetching comments for {post.post_url}")
+                    pyrogram_result = await pyrogram_tg.get_post_comments(post.post_url, limit=5)  # type: ignore
+                    if pyrogram_result.top_comments:
+                        stats["top_comments"] = pyrogram_result.top_comments
+                        logger.info(f"Pyrogram done: {len(pyrogram_result.top_comments)} comments")
 
         elif post.platform == "instagram" and post.post_url:
             logger.info(f"HikerAPI: fetching {post.post_url}")
