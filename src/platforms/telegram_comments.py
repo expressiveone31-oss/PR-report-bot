@@ -70,13 +70,30 @@ async def get_post_comments(post_url: str, limit: int = 5) -> TelegramCommentsRe
                 params=params,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
-                if resp.status != 200:
+                if resp.status == 429:
+                    logger.warning(f"telegram92 rate limit for {post_url}, retrying in 5s")
+                    await asyncio.sleep(5)
+                    async with session.get(
+                        f"{TELEGRAM92_BASE}/api/discuss",
+                        headers=HEADERS,
+                        params=params,
+                        timeout=aiohttp.ClientTimeout(total=15),
+                    ) as resp2:
+                        if resp2.status != 200:
+                            text2 = await resp2.text()
+                            return TelegramCommentsResult(
+                                post_url=post_url,
+                                error=f"HTTP {resp2.status} after retry: {text2[:100]}",
+                            )
+                        data = await resp2.json()
+                elif resp.status != 200:
                     text = await resp.text()
                     return TelegramCommentsResult(
                         post_url=post_url,
                         error=f"HTTP {resp.status}: {text[:100]}",
                     )
-                data = await resp.json()
+                else:
+                    data = await resp.json()
 
         # Структура ответа: {"messages": [...], "count": N}
         messages = data.get("messages", [])

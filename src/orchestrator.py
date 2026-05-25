@@ -263,7 +263,7 @@ async def process_mediaplan(mp: MediaPlan, project_name: str = "") -> str:
                 pyrogram_result = await pyrogram_tg.get_post_comments(url, limit=5)  # type: ignore
                 if pyrogram_result.top_comments:
                     post_dict["stats"]["top_comments"] = pyrogram_result.top_comments
-            await asyncio.sleep(1.2)  # 1.2 сек пауза — не более ~50 req/min
+            await asyncio.sleep(3.0)  # 3 сек пауза — ~20 req/min, в рамках ULTRA
 
     # Считаем охват
     # Для экономии используем данные из МП (не из API) — они зафиксированы командой
@@ -383,7 +383,7 @@ async def process_links(
                 pyrogram_result = await pyrogram_tg.get_post_comments(url, limit=5)  # type: ignore
                 if pyrogram_result.top_comments:
                     post_dict["stats"]["top_comments"] = pyrogram_result.top_comments
-            await asyncio.sleep(1.2)
+            await asyncio.sleep(3.0)
 
     # Суммарный охват из API + разбивка по постам для диагностики
     total_actual = 0
