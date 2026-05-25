@@ -247,23 +247,39 @@ async def process_mediaplan(mp: MediaPlan, project_name: str = "") -> str:
         for (i, _), result in zip(other_posts, other_results):
             posts_data[i] = result
 
-    # Второй проход — комментарии для TG-постов последовательно с паузой
-    # чтобы не превышать rate limit telegram92 (ULTRA ~1 req/s)
-    for post_dict in posts_data:
-        if post_dict and post_dict.get("stats", {}).get("_needs_comments"):
-            post_dict["stats"].pop("_needs_comments")
-            url = post_dict.get("post_url", "")
-            tg_comments = await telegram_comments.get_post_comments(url, limit=5)
-            if tg_comments.top_comments:
-                post_dict["stats"]["top_comments"] = tg_comments.top_comments
-                logger.info(f"telegram92 comments: {len(tg_comments.top_comments)} for {url}")
-            elif tg_comments.error and "429" in str(tg_comments.error):
-                logger.warning(f"telegram92 rate limit for {url}, skipping")
-            elif PYROGRAM_AVAILABLE:
-                pyrogram_result = await pyrogram_tg.get_post_comments(url, limit=5)  # type: ignore
-                if pyrogram_result.top_comments:
-                    post_dict["stats"]["top_comments"] = pyrogram_result.top_comments
-            await asyncio.sleep(3.0)  # 3 сек пауза — ~20 req/min, в рамках ULTRA
+    # Второй проход — комментарии.
+    # telegram92 лимит: 1 req/min на ULTRA — берём только топ-1 пост по кол-ву комментариев.
+    # Pyrogram (локально) — без ограничений, берём все посты.
+    posts_needing_comments = [
+        pd for pd in posts_data
+        if pd and pd.get("stats", {}).get("_needs_comments")
+    ]
+    for pd in posts_needing_comments:
+        pd["stats"].pop("_needs_comments")
+
+    if posts_needing_comments:
+        if PYROGRAM_AVAILABLE:
+            # Локально — Pyrogram без ограничений
+            for post_dict in posts_needing_comments:
+                url = post_dict.get("post_url", "")
+                result = await pyrogram_tg.get_post_comments(url, limit=5)  # type: ignore
+                if result.top_comments:
+                    post_dict["stats"]["top_comments"] = result.top_comments
+                    logger.info(f"Pyrogram comments: {len(result.top_comments)} for {url}")
+        else:
+            # Railway — telegram92, 1 req/min, пауза 61 сек между постами
+            for idx, post_dict in enumerate(posts_needing_comments):
+                if idx > 0:
+                    logger.info(f"telegram92 rate limit pause 61s before next comments request")
+                    await asyncio.sleep(61)
+                url = post_dict.get("post_url", "")
+                logger.info(f"telegram92 comments: {url}")
+                tg_result = await telegram_comments.get_post_comments(url, limit=5)
+                if tg_result.top_comments:
+                    post_dict["stats"]["top_comments"] = tg_result.top_comments
+                    logger.info(f"telegram92 comments done: {len(tg_result.top_comments)}")
+                elif tg_result.error:
+                    logger.warning(f"telegram92 comments error: {tg_result.error}")
 
     # Считаем охват
     # Для экономии используем данные из МП (не из API) — они зафиксированы командой
@@ -368,22 +384,29 @@ async def process_links(
         for (i, _), result in zip(other_posts, other_results):
             posts_data[i] = result
 
-    # Второй проход — комментарии последовательно с паузой (rate limit telegram92)
-    for post_dict in posts_data:
-        if post_dict and post_dict.get("stats", {}).get("_needs_comments"):
-            post_dict["stats"].pop("_needs_comments")
-            url = post_dict.get("post_url", "")
-            tg_comments = await telegram_comments.get_post_comments(url, limit=5)
-            if tg_comments.top_comments:
-                post_dict["stats"]["top_comments"] = tg_comments.top_comments
-                logger.info(f"telegram92 comments: {len(tg_comments.top_comments)} for {url}")
-            elif tg_comments.error and "429" in str(tg_comments.error):
-                logger.warning(f"telegram92 rate limit for {url}, skipping")
-            elif PYROGRAM_AVAILABLE:
-                pyrogram_result = await pyrogram_tg.get_post_comments(url, limit=5)  # type: ignore
-                if pyrogram_result.top_comments:
-                    post_dict["stats"]["top_comments"] = pyrogram_result.top_comments
-            await asyncio.sleep(3.0)
+    # Второй проход — комментарии (та же логика: Pyrogram локально, telegram92 топ-1 на Railway)
+    posts_needing_comments = [
+        pd for pd in posts_data
+        if pd and pd.get("stats", {}).get("_needs_comments")
+    ]
+    for pd in posts_needing_comments:
+        pd["stats"].pop("_needs_comments")
+
+    if posts_needing_comments:
+        if PYROGRAM_AVAILABLE:
+            for post_dict in posts_needing_comments:
+                url = post_dict.get("post_url", "")
+                result = await pyrogram_tg.get_post_comments(url, limit=5)  # type: ignore
+                if result.top_comments:
+                    post_dict["stats"]["top_comments"] = result.top_comments
+        else:
+            for idx, post_dict in enumerate(posts_needing_comments):
+                if idx > 0:
+                    await asyncio.sleep(61)
+                url = post_dict.get("post_url", "")
+                tg_result = await telegram_comments.get_post_comments(url, limit=5)
+                if tg_result.top_comments:
+                    post_dict["stats"]["top_comments"] = tg_result.top_comments
 
     # Суммарный охват из API + разбивка по постам для диагностики
     total_actual = 0
