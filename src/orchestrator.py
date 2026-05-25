@@ -10,9 +10,10 @@ import os
 from src.platforms import vk, telemetr, tgstat, hikerapi, pyrogram_tg, youtube, tiktok, twitter, telegram_comments
 from src.analyzer.openai_analyzer import analyze_campaign
 
-# Pyrogram доступен если есть файл сессии ИЛИ string session в переменной окружения
+# Pyrogram доступен только если есть локальный файл сессии.
+# На Railway используем telegram92 API — SESSION_STRING там не надёжен.
 SESSION_FILE = os.path.join(os.path.dirname(__file__), "..", "session", "userbot.session")
-PYROGRAM_AVAILABLE = os.path.exists(SESSION_FILE) or bool(os.getenv("SESSION_STRING"))
+PYROGRAM_AVAILABLE = os.path.exists(SESSION_FILE)
 
 logger = logging.getLogger(__name__)
 
