@@ -164,18 +164,32 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 @dp.message(ReportStates.waiting_csv_or_links, F.document)
 async def got_csv_mediaplan(message: Message, state: FSMContext) -> None:
     doc = message.document
-    if not doc.file_name.lower().endswith(".csv"):
-        await message.answer("Нужен файл в формате CSV. Попробуй снова или напиши ссылки вручную.")
+    fname = doc.file_name.lower()
+    if not (fname.endswith(".csv") or fname.endswith(".xlsx")):
+        await message.answer("Нужен файл в формате CSV или Excel (.xlsx). Попробуй снова или напиши ссылки вручную.", parse_mode=None)
         return
 
     await message.answer("Читаю медиаплан...", parse_mode=None)
 
     file = await bot.get_file(doc.file_id)
-    file_bytes = await bot.download_file(file.file_path)
-    content = file_bytes.read().decode("utf-8-sig")
+    file_bytes_io = await bot.download_file(file.file_path)
+    raw_bytes = file_bytes_io.read()
 
     # Название проекта из имени файла
     project_name = os.path.splitext(doc.file_name)[0].strip()
+
+    # Конвертируем xlsx → csv если нужно
+    if fname.endswith(".xlsx"):
+        try:
+            from src.parsers.xlsx_to_csv import xlsx_bytes_to_csv
+            content, sheet_name = xlsx_bytes_to_csv(raw_bytes)
+            logger.info(f"xlsx converted: sheet='{sheet_name}', len={len(content)}")
+        except Exception as e:
+            logger.error(f"xlsx conversion error: {e}", exc_info=True)
+            await message.answer(f"Не удалось прочитать Excel-файл: {e}", parse_mode=None)
+            return
+    else:
+        content = raw_bytes.decode("utf-8-sig")
 
     # Автодетекция типа МП: таргет или посев
     mp_type = _detect_mp_type(content)
