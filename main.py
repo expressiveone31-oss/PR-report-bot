@@ -120,6 +120,22 @@ def send_long(text: str, chunk_size: int = 4000) -> list[str]:
     return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
 
 
+@dp.message(Command("testcomments"))
+async def cmd_test_comments(message: Message, state: FSMContext) -> None:
+    """Временная команда для тестирования telegram92 API."""
+    from src.platforms.telegram_comments import get_post_comments
+    url = "https://t.me/movierls/20410"
+    await message.answer(f"Тестирую комментарии для {url}...", parse_mode=None)
+    result = await get_post_comments(url, limit=5)
+    if result.error:
+        await message.answer(f"Ошибка: {result.error}", parse_mode=None)
+    else:
+        lines = [f"Получено комментариев: {len(result.top_comments)}, всего в посте: {result.total_count}"]
+        for i, c in enumerate(result.top_comments, 1):
+            lines.append(f"{i}. {c[:200]}")
+        await message.answer("\n\n".join(lines), parse_mode=None)
+
+
 @dp.message(CommandStart())
 @dp.message(Command("help"))
 async def cmd_start(message: Message, state: FSMContext) -> None:
