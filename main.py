@@ -141,10 +141,10 @@ async def cmd_test_comments(message: Message, state: FSMContext) -> None:
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
-        "Привет! Помогу сформулировать акценты для отчёта Digital PR.\n\n"
+        "Привет! Помогу подготовить аналитику по прошедшему проекту.\n\n"
         "Скинь *CSV-файл медиаплана* — я извлеку всё сам.\n\n"
         "Или напиши *ссылки* вручную — тогда проведу тебя по шагам.\n\n"
-        "Поддерживаю: VK, Telegram, Instagram"
+        "Поддерживаю: VK, Telegram, Instagram, YouTube, TikTok, Twitter/X"
     )
     await state.set_state(ReportStates.waiting_csv_or_links)
 
@@ -495,7 +495,7 @@ async def handle_other(message: Message, state: FSMContext) -> None:
     current = await state.get_state()
     if current is None:
         await message.answer(
-            "Напиши /start чтобы начать формировать акценты для отчёта."
+            "Напиши /start чтобы начать аналитику по прошедшему проекту."
         )
 
 
