@@ -225,9 +225,11 @@ async def analyze_campaign(
         overreach = total_actual_reach - total_planned_reach
         savings_str = f"\n- Расчётная экономия бюджета: {total_savings:,.0f} ₽ (сверхплановый охват {overreach:,} ÷ 2 руб. рыночный CPV)"
 
-    # CPV считается только от бюджета размещений (без менеджмента и доп. расходов)
+    # CPV = бюджет размещений / (paid охват + органика)
+    # Органика учитывается в CPV — так как увеличивает общий охват при том же бюджете
     placement_budget = total_placement_budget if total_placement_budget else total_budget
-    actual_cpv = placement_budget / total_actual_reach if total_actual_reach > 0 else 0
+    total_reach_with_organic = total_actual_reach + total_organic_reach
+    actual_cpv = placement_budget / total_reach_with_organic if total_reach_with_organic > 0 else 0
     planned_cpv = placement_budget / total_planned_reach if total_planned_reach > 0 else 0
     cpv_ratio = planned_cpv / actual_cpv if actual_cpv > 0 else 0
     reach_ratio = total_actual_reach / total_planned_reach if total_planned_reach > 0 else 0
