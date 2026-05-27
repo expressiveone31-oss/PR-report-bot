@@ -287,12 +287,15 @@ async def process_mediaplan(mp: MediaPlan, project_name: str = "") -> str:
     total_actual_from_mp = mp.total_actual_reach  # берём итоговый охват из строки МП
     total_organic_reach = sum(p.actual_reach or 0 for p in mp.organic_posts)
 
-    # Для передачи в промпт — API данные (свежие просмотры)
+    # Для передачи в промпт — для органики всегда берём цифры из МП, не из API
+    # Это предотвращает ситуацию когда GPT суммирует API-просмотры органики вместо МП-значений
     total_actual = 0
     for i, post_dict in enumerate(posts_data):
         post = all_posts[i]
         if post.is_organic:
             actual_views = post.actual_reach or 0
+            # Подменяем API-просмотры на МП-значения для органики
+            post_dict["stats"]["views"] = actual_views
         else:
             views = post_dict["stats"].get("views")
             actual_views = views if views else (post.actual_reach or 0)
