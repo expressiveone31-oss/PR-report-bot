@@ -144,9 +144,9 @@ def parse_csv(content: str) -> MediaPlan:
             if not row or not row[0].strip():
                 continue
             name = row[0].strip()
-            # Стоп-строки: итого и пустые блоки
+            # Стоп-строки: итого завершает paid-блок
             if name.lower().startswith("итого") or name.lower().startswith("общий"):
-                continue
+                break
             # Если строка явно из блока стоимостей проекта — пропускаем
             if any(kw in name for kw in ("Стоимость", "Копирайт", "Account", "Junior", "Прогноз", "Факт", "Сумма", "Менеджер", "Мемы", "Видеоролик", "Логистик", "Печать")):
                 continue
