@@ -148,7 +148,7 @@ def parse_csv(content: str) -> MediaPlan:
             if name.lower().startswith("итого") or name.lower().startswith("общий"):
                 continue
             # Если строка явно из блока стоимостей проекта — пропускаем
-            if any(kw in name for kw in ("Стоимость", "Копирайт", "Account", "Junior", "Прогноз", "Факт", "Сумма", "Менеджер")):
+            if any(kw in name for kw in ("Стоимость", "Копирайт", "Account", "Junior", "Прогноз", "Факт", "Сумма", "Менеджер", "Мемы", "Видеоролик", "Логистик", "Печать")):
                 continue
 
             def get(key: str) -> str:
@@ -174,6 +174,9 @@ def parse_csv(content: str) -> MediaPlan:
                 date=get("Дата"),
                 is_organic=False,
             )
+            # Пропускаем строки без планового охвата — это не размещения
+            if post.planned_reach == 0 and not post.actual_reach:
+                continue
             if post.post_url or post.channel_url:
                 mp.paid_posts.append(post)
 
