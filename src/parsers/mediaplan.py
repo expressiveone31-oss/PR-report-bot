@@ -158,27 +158,47 @@ def parse_csv(content: str) -> MediaPlan:
                 return ""
 
             channel_url = get("Ссылка")
-            post_url = _pick_best_url(get("Ссылка на публикацию"))
-            platform = _detect_platform(post_url or channel_url)
+            raw_post_urls = get("Ссылка на публикацию")
+            planned_reach = _parse_int(get("Планируемый охват"))
+            actual_reach_raw = int(_parse_number(get("Охват (факт)")) or 0) or None
+            cost = _parse_number(get("Общая стоимость с АК 15%"))
+            planned_cpv = _parse_number(get("Планируемый CPV"))
+            actual_cpv = _parse_number(get("Факт CPV"))
+            date = get("Дата")
 
-            post = Post(
-                name=name,
-                channel_url=channel_url,
-                platform=platform,
-                post_url=post_url,
-                planned_reach=_parse_int(get("Планируемый охват")),
-                actual_reach=int(_parse_number(get("Охват (факт)")) or 0) or None,
-                cost=_parse_number(get("Общая стоимость с АК 15%")),
-                planned_cpv=_parse_number(get("Планируемый CPV")),
-                actual_cpv=_parse_number(get("Факт CPV")),
-                date=get("Дата"),
-                is_organic=False,
-            )
-            # Пропускаем строки без планового охвата — это не размещения
-            if post.planned_reach == 0 and not post.actual_reach:
+            # Извлекаем все ссылки из ячейки — один блогер может иметь несколько публикаций
+            all_post_urls = [
+                u.strip() for u in re.split(r'[\n\r;]+', raw_post_urls)
+                if u.strip().startswith('http')
+                and not any(skip in u for skip in ('disk.yandex', 'yandex.ru/i/', 'prnt.sc', 'drive.google', 'clck.ru'))
+            ]
+
+            if not all_post_urls:
+                all_post_urls = [_pick_best_url(raw_post_urls)]
+
+            # Пропускаем строки без планового охвата
+            if planned_reach == 0 and not actual_reach_raw:
                 continue
-            if post.post_url or post.channel_url:
-                mp.paid_posts.append(post)
+
+            for i, post_url in enumerate(all_post_urls):
+                platform = _detect_platform(post_url or channel_url)
+                # Для нескольких ссылок: охват и стоимость только на первой строке
+                # (чтобы не задваивать бюджет и план)
+                post = Post(
+                    name=name,
+                    channel_url=channel_url,
+                    platform=platform,
+                    post_url=post_url,
+                    planned_reach=planned_reach if i == 0 else 0,
+                    actual_reach=actual_reach_raw if i == 0 else None,
+                    cost=cost if i == 0 else None,
+                    planned_cpv=planned_cpv if i == 0 else None,
+                    actual_cpv=actual_cpv if i == 0 else None,
+                    date=date,
+                    is_organic=False,
+                )
+                if post.post_url or post.channel_url:
+                    mp.paid_posts.append(post)
 
     # --- Органика ---
     # Ищем триггер «органически» в любой ячейке любой строки.
