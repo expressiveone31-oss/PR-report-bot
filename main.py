@@ -43,6 +43,10 @@ class ReportStates(StatesGroup):
     waiting_project_name  = State()
 
 
+class UpdateStates(StatesGroup):
+    waiting_xlsx = State()   # ждём xlsx для обновления охватов
+
+
 def _detect_mp_type(content: str) -> str:
     """
     Определяет тип МП: 'target' или 'posev'.
@@ -147,14 +151,92 @@ async def cmd_test_comments(message: Message, state: FSMContext) -> None:
             await message.answer("\n".join(lines), parse_mode=None)
 
 
+@dp.message(Command("update"))
+async def cmd_update(message: Message, state: FSMContext) -> None:
+    """Режим обновления охватов в xlsx."""
+    await state.clear()
+    await message.answer(
+        "Скинь *Excel-файл (.xlsx)* с медиапланом.\n\n"
+        "Я пройдусь по ссылкам на публикации через API и проставлю актуальные охваты прямо в таблицу.\n\n"
+        "Верну обновлённый файл с пометкой *\\_updated* в имени.",
+        parse_mode="Markdown",
+    )
+    await state.set_state(UpdateStates.waiting_xlsx)
+
+
+@dp.message(UpdateStates.waiting_xlsx, F.document)
+async def got_xlsx_for_update(message: Message, state: FSMContext) -> None:
+    doc = message.document
+    fname = doc.file_name or ""
+    if not (fname.lower().endswith(".xlsx") or fname.lower().endswith(".csv")):
+        await message.answer("Нужен файл .xlsx или .csv. Попробуй ещё раз.", parse_mode=None)
+        return
+
+    await message.answer("Читаю файл и иду за данными через API. Это может занять несколько минут...", parse_mode=None)
+
+    file = await bot.get_file(doc.file_id)
+    file_bytes_io = await bot.download_file(file.file_path)
+    raw_bytes = file_bytes_io.read()
+
+    # Если CSV — конвертируем в xlsx чтобы вернуть xlsx
+    if fname.lower().endswith(".csv"):
+        try:
+            import openpyxl
+            from src.parsers.xlsx_to_csv import xlsx_bytes_to_csv
+            # CSV → xlsx через openpyxl
+            import csv, io as _io
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            reader = csv.reader(_io.StringIO(raw_bytes.decode("utf-8-sig")))
+            for row in reader:
+                ws.append(row)
+            buf = _io.BytesIO()
+            wb.save(buf)
+            raw_bytes = buf.getvalue()
+            fname = fname.replace(".csv", ".xlsx")
+        except Exception as e:
+            await message.answer(f"Не удалось конвертировать CSV: {e}", parse_mode=None)
+            return
+
+    try:
+        from src.updater.xlsx_updater import update_xlsx
+        updated_bytes, stats = await update_xlsx(raw_bytes)
+    except Exception as e:
+        logger.error(f"xlsx update error: {e}", exc_info=True)
+        await message.answer(f"Ошибка при обновлении: {e}", parse_mode=None)
+        return
+
+    # Формируем имя файла с _updated
+    base = os.path.splitext(fname)[0]
+    out_fname = f"{base}_updated.xlsx"
+
+    await state.clear()
+    await message.answer(
+        f"Готово!\n\n"
+        f"Обновлено ячеек: {stats['updated']}\n"
+        f"Нет данных (API): {stats['errors']}\n\n"
+        f"Обновлённые ячейки выделены жёлтым, недоступные — красным.",
+        parse_mode=None,
+    )
+    from aiogram.types import BufferedInputFile
+    await message.answer_document(
+        BufferedInputFile(updated_bytes, filename=out_fname),
+    )
+
+
+@dp.message(UpdateStates.waiting_xlsx)
+async def update_wrong_file(message: Message, state: FSMContext) -> None:
+    await message.answer("Жду файл .xlsx или .csv. Скинь файл или напиши /update чтобы начать заново.", parse_mode=None)
+
+
 @dp.message(CommandStart())
 @dp.message(Command("help"))
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
         "Привет! Помогу подготовить аналитику по прошедшему проекту.\n\n"
-        "Скинь *CSV-файл медиаплана* — я извлеку всё сам.\n\n"
-        "Или напиши *ссылки* вручную — тогда проведу тебя по шагам.\n\n"
+        "*Собрать отчёт* — /start или скинь CSV/Excel медиаплана\n"
+        "*Обновить охваты в таблице* — /update\n\n"
         "Поддерживаю: VK, Telegram, Instagram, YouTube, TikTok, Twitter/X"
     )
     await state.set_state(ReportStates.waiting_csv_or_links)
