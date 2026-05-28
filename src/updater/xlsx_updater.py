@@ -21,9 +21,11 @@ logger = logging.getLogger(__name__)
 
 # Ключевые слова для поиска нужных колонок
 POST_URL_KEYWORDS = ("ссылка на публикацию", "ссылка на пост", "ссылка на твит",
-                     "ссылка на рекламу", "post url", "link")
-REACH_FACT_KEYWORDS = ("охват (факт)", "охват факт", "реальный охват", "факт охват",
-                       "views fact", "охват")
+                     "ссылка на рекламу", "post url")
+# Порядок важен: более точные совпадения первыми
+# НЕ включаем просто "охват" — это подхватит "Планируемый охват"
+REACH_FACT_KEYWORDS = ("охват (факт)", "охват факт", "реальный охват",
+                       "факт охват", "views fact")
 
 # Жёлтая заливка для обновлённых ячеек
 UPDATED_FILL = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
@@ -80,10 +82,16 @@ def _is_post_url(url: str) -> bool:
     return False
 
 
-def _find_col(headers: list[str], keywords: tuple) -> Optional[int]:
-    """Ищет колонку по ключевым словам в заголовке."""
+def _find_col(headers: list[str], keywords: tuple,
+              exclude_keywords: tuple = ()) -> Optional[int]:
+    """Ищет колонку по ключевым словам в заголовке.
+    exclude_keywords — слова которые НЕ должны быть в заголовке.
+    """
     for i, h in enumerate(headers):
         h_lower = h.strip().lower()
+        # Пропускаем если заголовок содержит слова-исключения
+        if any(ex in h_lower for ex in exclude_keywords):
+            continue
         for kw in keywords:
             if kw in h_lower:
                 return i
@@ -162,8 +170,10 @@ async def update_xlsx(xlsx_bytes: bytes) -> tuple[bytes, dict]:
             logger.info(f"Sheet '{sheet.title}': no header found, skipping")
             continue
 
-        col_url = _find_col(headers, POST_URL_KEYWORDS)
-        col_reach = _find_col(headers, REACH_FACT_KEYWORDS)
+        col_url = _find_col(headers, POST_URL_KEYWORDS,
+                            exclude_keywords=("канал", "channel", "профил"))
+        col_reach = _find_col(headers, REACH_FACT_KEYWORDS,
+                              exclude_keywords=("план", "прогноз", "ожидаем", "plan"))
 
         if col_url is None or col_reach is None:
             logger.info(f"Sheet '{sheet.title}': col_url={col_url}, col_reach={col_reach}, skipping")
@@ -171,9 +181,16 @@ async def update_xlsx(xlsx_bytes: bytes) -> tuple[bytes, dict]:
 
         logger.info(f"Sheet '{sheet.title}': url_col={col_url}, reach_col={col_reach}")
 
-        # Собираем все URL для обработки (VK последовательно, остальные параллельно)
+        # Собираем все URL для обработки.
+        # Останавливаемся на строке "Итого" — дальше менеджерский блок.
         url_rows = []
         for row_idx in range(header_row_idx + 1, sheet.max_row + 1):
+            # Проверяем первую ячейку строки на стоп-слова
+            first_cell = sheet.cell(row=row_idx, column=1)
+            first_val = str(first_cell.value or "").strip().lower()
+            if first_val.startswith("итого") or first_val.startswith("общий"):
+                break
+            # Проверяем ячейку с URL
             cell_url = sheet.cell(row=row_idx, column=col_url + 1)
             url = str(cell_url.value).strip() if cell_url.value else ""
             if _is_post_url(url):
