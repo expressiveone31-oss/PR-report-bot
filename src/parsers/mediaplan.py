@@ -140,6 +140,33 @@ def parse_csv(content: str) -> MediaPlan:
         headers = [h.strip() for h in rows[header_idx]]
         col = {h: idx for idx, h in enumerate(headers) if h}
 
+        def find_col(*keywords: str, exclude: tuple = ()) -> Optional[int]:
+            """Ищет индекс колонки по ключевым словам в заголовке."""
+            for kw in keywords:
+                for h, idx in col.items():
+                    h_l = h.lower()
+                    if kw.lower() in h_l and not any(ex.lower() in h_l for ex in exclude):
+                        return idx
+            return None
+
+        # Определяем индексы колонок один раз для всего блока
+        idx_channel_url   = find_col("Ссылка", exclude=("публикацию", "пост", "твит", "рекламу", "скрин"))
+        idx_post_url      = find_col("Ссылка на публикацию", "Ссылка на пост", "Ссылка на твит", "Публикация", "Ссылка на рекламу")
+        idx_planned_reach = find_col("Планируемый охват", "Охват прогноз", "Охват план", "Ожидаемый охват",
+                                     "Просмотры", "Охват", exclude=("факт", "реальный", "итого"))
+        idx_actual_reach  = find_col("Охват (факт)", "Охват факт", "Просмотры факт", "Реальный охват",
+                                     "Факт охват", "Факт просмотры")
+        idx_cost          = find_col("Общая стоимость с АК", "Цена с АК", "Стоимость с АК", "Цена с ак")
+        idx_planned_cpv   = find_col("Планируемый CPV", "Плановый CPV", "CPV план", "CPV прогноз",
+                                     exclude=("факт",))
+        idx_actual_cpv    = find_col("Факт CPV", "CPV факт", "CPV ФАКТ")
+        idx_date          = find_col("Дата")
+
+        def get_by_idx(row: list, idx: Optional[int]) -> str:
+            if idx is None or idx >= len(row):
+                return ""
+            return row[idx].strip()
+
         for row in rows[header_idx + 1:]:
             if not row or not row[0].strip():
                 continue
@@ -157,14 +184,14 @@ def parse_csv(content: str) -> MediaPlan:
                     return row[idx].strip()
                 return ""
 
-            channel_url = get("Ссылка")
-            raw_post_urls = get("Ссылка на публикацию")
-            planned_reach = _parse_int(get("Планируемый охват"))
-            actual_reach_raw = int(_parse_number(get("Охват (факт)")) or 0) or None
-            cost = _parse_number(get("Общая стоимость с АК 15%"))
-            planned_cpv = _parse_number(get("Планируемый CPV"))
-            actual_cpv = _parse_number(get("Факт CPV"))
-            date = get("Дата")
+            channel_url      = get_by_idx(row, idx_channel_url)
+            raw_post_urls    = get_by_idx(row, idx_post_url)
+            planned_reach    = _parse_int(get_by_idx(row, idx_planned_reach))
+            actual_reach_raw = int(_parse_number(get_by_idx(row, idx_actual_reach)) or 0) or None
+            cost             = _parse_number(get_by_idx(row, idx_cost))
+            planned_cpv      = _parse_number(get_by_idx(row, idx_planned_cpv))
+            actual_cpv       = _parse_number(get_by_idx(row, idx_actual_cpv))
+            date             = get_by_idx(row, idx_date)
 
             # Извлекаем все ссылки из ячейки — один блогер может иметь несколько публикаций
             all_post_urls = [
