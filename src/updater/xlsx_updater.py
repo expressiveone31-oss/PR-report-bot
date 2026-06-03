@@ -27,9 +27,10 @@ POST_URL_KEYWORDS = ("ссылка на публикацию", "ссылка н�
 REACH_FACT_KEYWORDS = ("охват (факт)", "охват факт", "реальный охват",
                        "факт охват", "views fact")
 
-# Жёлтая заливка для обновлённых ячеек
-UPDATED_FILL = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
-ERROR_FILL = PatternFill(start_color="FFB3B3", end_color="FFB3B3", fill_type="solid")
+# Цвета ячеек
+UPDATED_FILL = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")   # жёлтый — охват обновлён
+ERROR_FILL   = PatternFill(start_color="FFB3B3", end_color="FFB3B3", fill_type="solid")   # красный — нет данных
+DELETED_FILL = PatternFill(start_color="FFD0E4", end_color="FFD0E4", fill_type="solid")   # розовый — пост удалён
 
 
 def _detect_platform(url: str) -> str:
@@ -98,57 +99,70 @@ def _find_col(headers: list[str], keywords: tuple,
     return None
 
 
-async def _get_views(url: str) -> Optional[int]:
-    """Идёт в нужный API и возвращает просмотры. None если не удалось."""
+async def _get_views(url: str) -> tuple[Optional[int], str]:
+    """
+    Идёт в нужный API и возвращает (просмотры, статус).
+    Статус: "ok" | "deleted" | "error"
+    """
     platform = _detect_platform(url)
     try:
         if platform == "vk":
             from src.platforms.vk import get_post_stats
             result = await get_post_stats(url)
-            return result.views
+            if result.error:
+                return None, "error"
+            return result.views, "ok"
 
         elif platform == "telegram":
             from src.platforms import telemetr, tgstat
             result = await telemetr.get_post_stats(url)
             telemetr_views = result.views or 0
-            # TGStat cross-check
             fallback = await tgstat.get_post_stats(url)
             tgstat_views = fallback.views or 0
 
-            # Если TGStat говорит что поста нет — пост удалён.
-            # Telemetr кеширует данные удалённых постов — не доверяем ему в этом случае.
+            # Пост удалён: TGStat не находит, но Telemetr отдаёт кеш
             post_deleted = fallback.error in ("post_not_found_in_channel", "post_not_found")
+            if post_deleted and telemetr_views > 0:
+                return telemetr_views, "deleted"
             if post_deleted:
-                return None
+                return None, "error"
 
             if not fallback.error and tgstat_views > telemetr_views:
-                return tgstat_views
-            return telemetr_views if telemetr_views > 0 else None
+                return tgstat_views, "ok"
+            return (telemetr_views, "ok") if telemetr_views > 0 else (None, "error")
 
         elif platform == "instagram":
             from src.platforms.hikerapi import get_post_stats
             result = await get_post_stats(url)
-            return result.views
+            if result.error:
+                return None, "error"
+            return result.views, "ok"
 
         elif platform == "youtube":
             from src.platforms.youtube import get_post_stats
             result = await get_post_stats(url)
-            return result.views
+            if result.error:
+                return None, "error"
+            return result.views, "ok"
 
         elif platform == "tiktok":
             from src.platforms.tiktok import get_post_stats
             result = await get_post_stats(url)
-            return result.views
+            if result.error:
+                return None, "error"
+            return result.views, "ok"
 
         elif platform == "twitter":
             from src.platforms.twitter import get_post_stats
             result = await get_post_stats(url)
-            return result.views
+            if result.error:
+                return None, "error"
+            return result.views, "ok"
 
     except Exception as e:
         logger.warning(f"API error for {url}: {e}")
 
-    return None
+    return None, "error"
 
 
 async def update_xlsx(xlsx_bytes: bytes) -> tuple[bytes, dict]:
@@ -158,7 +172,7 @@ async def update_xlsx(xlsx_bytes: bytes) -> tuple[bytes, dict]:
     stats = {"updated": N, "skipped": N, "errors": N}
     """
     wb = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), data_only=True)
-    stats = {"updated": 0, "skipped": 0, "errors": 0}
+    stats = {"updated": 0, "skipped": 0, "errors": 0, "deleted": 0}
 
     for sheet in wb.worksheets:
         # Ищем строку-заголовок
@@ -211,30 +225,36 @@ async def update_xlsx(xlsx_bytes: bytes) -> tuple[bytes, dict]:
         other_rows = [(r, u) for r, u in url_rows if _detect_platform(u) != "vk"]
 
         # Получаем просмотры
-        views_map: dict[int, Optional[int]] = {}
+        views_map: dict[int, tuple[Optional[int], str]] = {}
 
         for row_idx, url in vk_rows:
-            views = await _get_views(url)
-            views_map[row_idx] = views
+            result = await _get_views(url)
+            views_map[row_idx] = result
             await asyncio.sleep(0.4)
 
         if other_rows:
             results = await asyncio.gather(*[_get_views(u) for _, u in other_rows])
-            for (row_idx, _), views in zip(other_rows, results):
-                views_map[row_idx] = views
+            for (row_idx, _), result in zip(other_rows, results):
+                views_map[row_idx] = result
 
         # Проставляем в таблицу
         for row_idx, url in url_rows:
-            views = views_map.get(row_idx)
+            views, status = views_map.get(row_idx, (None, "error"))
             cell_reach = sheet.cell(row=row_idx, column=col_reach + 1)
 
-            if views is not None:
+            if status == "ok" and views is not None:
                 cell_reach.value = views
                 cell_reach.fill = UPDATED_FILL
                 stats["updated"] += 1
                 logger.info(f"Updated row {row_idx}: {views:,} for {url}")
+            elif status == "deleted" and views is not None:
+                # Пост удалён — проставляем последний известный охват, розовый цвет
+                cell_reach.value = views
+                cell_reach.fill = DELETED_FILL
+                stats["deleted"] += 1
+                logger.info(f"Deleted post row {row_idx}: last known {views:,} for {url}")
             else:
-                # Оставляем пустым, помечаем красным
+                # Нет данных — оставляем пустым, красный цвет
                 cell_reach.value = None
                 cell_reach.fill = ERROR_FILL
                 stats["errors"] += 1

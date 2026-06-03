@@ -213,9 +213,9 @@ async def got_xlsx_for_update(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
         f"Готово!\n\n"
-        f"Обновлено ячеек: {stats['updated']}\n"
-        f"Нет данных (API): {stats['errors']}\n\n"
-        f"Обновлённые ячейки выделены жёлтым, недоступные — красным.",
+        f"🟡 Жёлтый ({stats['updated']}) — охват обновлён, пост существует\n"
+        f"🌸 Розовый ({stats['deleted']}) — пост удалён, проставлен последний известный охват\n"
+        f"🔴 Красный ({stats['errors']}) — нет данных (API не ответил или платформа недоступна)",
         parse_mode=None,
     )
     from aiogram.types import BufferedInputFile
