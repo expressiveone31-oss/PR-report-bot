@@ -114,6 +114,13 @@ async def _get_views(url: str) -> Optional[int]:
             # TGStat cross-check
             fallback = await tgstat.get_post_stats(url)
             tgstat_views = fallback.views or 0
+
+            # Если TGStat говорит что поста нет — пост удалён.
+            # Telemetr кеширует данные удалённых постов — не доверяем ему в этом случае.
+            post_deleted = fallback.error in ("post_not_found_in_channel", "post_not_found")
+            if post_deleted:
+                return None
+
             if not fallback.error and tgstat_views > telemetr_views:
                 return tgstat_views
             return telemetr_views if telemetr_views > 0 else None
