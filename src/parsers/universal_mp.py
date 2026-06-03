@@ -156,8 +156,8 @@ def parse_with_schema(content: str, schema: CsvSchema) -> MediaPlan:
         actual_cpv = _parse_number(_cell(row, schema.col_actual_cpv))
         date = _cell(row, schema.col_date)
 
-        # Пропускаем строки без охвата и без ссылки на пост
-        if not post_url and planned_reach == 0:
+        # Пропускаем строки без ссылки на публикацию — это прогнозные/незавершённые размещения
+        if not post_url:
             continue
 
         mp.paid_posts.append(Post(
