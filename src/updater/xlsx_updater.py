@@ -198,10 +198,11 @@ async def update_xlsx(xlsx_bytes: bytes) -> tuple[bytes, dict]:
                               exclude_keywords=("план", "прогноз", "ожидаем", "plan"))
 
         if col_url is None or col_reach is None:
-            logger.info(f"Sheet '{sheet.title}': col_url={col_url}, col_reach={col_reach}, skipping")
+            logger.warning(f"Sheet '{sheet.title}': col_url={col_url}, col_reach={col_reach} — не найдены нужные колонки")
+            logger.warning(f"Sheet '{sheet.title}': headers={headers}")
             continue
 
-        logger.info(f"Sheet '{sheet.title}': url_col={col_url}, reach_col={col_reach}")
+        logger.info(f"Sheet '{sheet.title}': url_col={col_url} ('{headers[col_url]}'), reach_col={col_reach} ('{headers[col_reach]}')")
 
         # Собираем все URL для обработки.
         # Останавливаемся на строке "Итого" — дальше менеджерский блок.
