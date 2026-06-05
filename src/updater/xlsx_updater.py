@@ -21,11 +21,12 @@ logger = logging.getLogger(__name__)
 
 # Ключевые слова для поиска нужных колонок
 POST_URL_KEYWORDS = ("ссылка на публикацию", "ссылка на пост", "ссылка на твит",
-                     "ссылка на рекламу", "post url")
+                     "ссылка на рекламу", "публикация", "post url")
 # Порядок важен: более точные совпадения первыми
 # НЕ включаем просто "охват" — это подхватит "Планируемый охват"
-REACH_FACT_KEYWORDS = ("охват (факт)", "охват факт", "реальный охват",
-                       "факт охват", "views fact")
+REACH_FACT_KEYWORDS = ("охват (факт)", "охват факт", "просмотры факт", "просмотры (факт)",
+                       "реальный охват", "итого охват", "итого просмотры",
+                       "реальные просмотры", "факт охват", "факт просмотры", "views fact")
 
 # Цвета ячеек
 UPDATED_FILL = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")   # жёлтый — охват обновлён
@@ -206,10 +207,14 @@ async def update_xlsx(xlsx_bytes: bytes) -> tuple[bytes, dict]:
         # Останавливаемся на строке "Итого" — дальше менеджерский блок.
         url_rows = []
         for row_idx in range(header_row_idx + 1, sheet.max_row + 1):
-            # Проверяем первую ячейку строки на стоп-слова
-            first_cell = sheet.cell(row=row_idx, column=1)
-            first_val = str(first_cell.value or "").strip().lower()
-            if first_val.startswith("итого") or first_val.startswith("общий"):
+            # Проверяем первые 3 ячейки строки на стоп-слова
+            stop = False
+            for col_check in range(1, 4):
+                cell_val = str(sheet.cell(row=row_idx, column=col_check).value or "").strip().lower()
+                if cell_val.startswith("итого") or cell_val.startswith("общий"):
+                    stop = True
+                    break
+            if stop:
                 break
             # Проверяем ячейку с URL
             cell_url = sheet.cell(row=row_idx, column=col_url + 1)
