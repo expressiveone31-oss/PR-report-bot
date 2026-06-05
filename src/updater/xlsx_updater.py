@@ -183,7 +183,9 @@ async def update_xlsx(xlsx_bytes: bytes) -> tuple[bytes, dict]:
             row_strs = [str(c).strip() if c is not None else "" for c in row]
             row_lower = " ".join(row_strs).lower()
             if any(kw in row_lower for kw in ("ссылка на публикацию", "ссылка на пост",
-                                               "ссылка на твит", "охват (факт)")):
+                                               "ссылка на твит", "охват (факт)",
+                                               "просмотры факт", "публикация",
+                                               "охват факт", "реальный охват")):
                 header_row_idx = row_idx
                 headers = row_strs
                 break
