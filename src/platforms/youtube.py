@@ -54,31 +54,54 @@ def _parse_youtube_url(url: str) -> Optional[str]:
     return None
 
 
+async def _get_uploads_playlist_id(
+    session: aiohttp.ClientSession,
+    channel_id: str,
+) -> Optional[str]:
+    """Получает ID плейлиста uploads канала (стоит 1 unit вместо 100 у search)."""
+    params = {
+        "key": YOUTUBE_API_KEY,
+        "id": channel_id,
+        "part": "contentDetails",
+    }
+    async with session.get(f"{YOUTUBE_API_BASE}/channels", params=params) as resp:
+        data = await resp.json()
+    items = data.get("items", [])
+    if not items:
+        return None
+    return items[0].get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads")
+
+
 async def _get_channel_average(
     session: aiohttp.ClientSession,
     channel_id: str,
     exclude_video_id: str,
     count: int = 20,
 ) -> ChannelAverage:
-    """Берёт последние N видео канала и считает средние показатели."""
+    """Берёт последние N видео канала и считает средние показатели.
+    Использует playlistItems.list (1 unit) вместо search.list (100 units).
+    """
     try:
-        # Получаем последние видео канала
+        # Шаг 1: получаем uploads playlist_id (1 unit)
+        uploads_playlist_id = await _get_uploads_playlist_id(session, channel_id)
+        if not uploads_playlist_id:
+            return ChannelAverage()
+
+        # Шаг 2: получаем последние видео из плейлиста (1 unit)
         params = {
             "key": YOUTUBE_API_KEY,
-            "channelId": channel_id,
-            "part": "id",
-            "order": "date",
+            "playlistId": uploads_playlist_id,
+            "part": "contentDetails",
             "maxResults": count + 1,
-            "type": "video",
         }
-        async with session.get(f"{YOUTUBE_API_BASE}/search", params=params) as resp:
+        async with session.get(f"{YOUTUBE_API_BASE}/playlistItems", params=params) as resp:
             data = await resp.json()
 
         items = data.get("items", [])
         video_ids = [
-            item["id"]["videoId"]
+            item["contentDetails"]["videoId"]
             for item in items
-            if item.get("id", {}).get("videoId") != exclude_video_id
+            if item.get("contentDetails", {}).get("videoId") != exclude_video_id
         ][:count]
 
         if not video_ids:
