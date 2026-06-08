@@ -10,6 +10,7 @@ Host: telegram92.p.rapidapi.com
 import re
 import logging
 import aiohttp
+import asyncio
 from dataclasses import dataclass, field
 from typing import Optional
 from src.config import RAPIDAPI_KEY
@@ -43,17 +44,22 @@ def _parse_tg_url(url: str) -> Optional[tuple[str, str]]:
 
 async def get_post_comments(post_url: str, limit: int = 5) -> TelegramCommentsResult:
     """Получает топ комментариев к Telegram-посту."""
+    logger.info(f"[COMMENTS DEBUG] telegram_comments.get_post_comments called for {post_url}")
+    
     if not RAPIDAPI_KEY:
+        logger.error(f"[COMMENTS DEBUG] RAPIDAPI_KEY not set")
         return TelegramCommentsResult(post_url=post_url, error="RAPIDAPI_KEY не задан")
 
     parsed = _parse_tg_url(post_url)
     if not parsed:
+        logger.error(f"[COMMENTS DEBUG] Failed to parse URL: {post_url}")
         return TelegramCommentsResult(
             post_url=post_url,
             error="Не удалось распарсить ссылку Telegram",
         )
 
     peer, msg_id = parsed
+    logger.info(f"[COMMENTS DEBUG] Parsed: peer={peer}, msg_id={msg_id}")
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -70,8 +76,9 @@ async def get_post_comments(post_url: str, limit: int = 5) -> TelegramCommentsRe
                 params=params,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
+                logger.info(f"[COMMENTS DEBUG] telegram92 response status: {resp.status}")
                 if resp.status == 429:
-                    logger.warning(f"telegram92 rate limit for {post_url}, retrying in 5s")
+                    logger.warning(f"[COMMENTS DEBUG] telegram92 rate limit for {post_url}, retrying in 5s")
                     await asyncio.sleep(5)
                     async with session.get(
                         f"{TELEGRAM92_BASE}/api/discuss",
@@ -79,13 +86,29 @@ async def get_post_comments(post_url: str, limit: int = 5) -> TelegramCommentsRe
                         params=params,
                         timeout=aiohttp.ClientTimeout(total=15),
                     ) as resp2:
-                        if resp2.status != 200:
+                        if resp2.status == 204:
+                            # No Content — комментариев нет, но это не ошибка
+                            logger.info(f"[COMMENTS DEBUG] telegram92 returned 204 (no comments available)")
+                            return TelegramCommentsResult(
+                                post_url=post_url,
+                                top_comments=[],
+                                total_count=0,
+                            )
+                        elif resp2.status != 200:
                             text2 = await resp2.text()
                             return TelegramCommentsResult(
                                 post_url=post_url,
                                 error=f"HTTP {resp2.status} after retry: {text2[:100]}",
                             )
                         data = await resp2.json()
+                elif resp.status == 204:
+                    # No Content — комментариев нет, но это не ошибка
+                    logger.info(f"[COMMENTS DEBUG] telegram92 returned 204 (no comments available)")
+                    return TelegramCommentsResult(
+                        post_url=post_url,
+                        top_comments=[],
+                        total_count=0,
+                    )
                 elif resp.status != 200:
                     text = await resp.text()
                     return TelegramCommentsResult(
@@ -98,6 +121,7 @@ async def get_post_comments(post_url: str, limit: int = 5) -> TelegramCommentsRe
         # Структура ответа: {"messages": [...], "count": N}
         messages = data.get("messages", [])
         count = data.get("count")
+        logger.info(f"[COMMENTS DEBUG] telegram92 response: messages={len(messages)}, count={count}")
 
         texts = []
         for msg in messages:
@@ -107,16 +131,18 @@ async def get_post_comments(post_url: str, limit: int = 5) -> TelegramCommentsRe
                 texts.append(text)
 
         logger.info(
-            f"TG comments done: peer={peer}, msg_id={msg_id}, "
+            f"[COMMENTS DEBUG] TG comments done: peer={peer}, msg_id={msg_id}, "
             f"got={len(texts)}, total={count}"
         )
 
-        return TelegramCommentsResult(
+        result = TelegramCommentsResult(
             post_url=post_url,
             top_comments=texts[:limit],
             total_count=count,
         )
+        logger.info(f"[COMMENTS DEBUG] Returning {len(result.top_comments)} comments")
+        return result
 
     except Exception as e:
-        logger.warning(f"TG comments error for {post_url}: {e}")
+        logger.error(f"[COMMENTS DEBUG] TG comments exception for {post_url}: {e}", exc_info=True)
         return TelegramCommentsResult(post_url=post_url, error=str(e))

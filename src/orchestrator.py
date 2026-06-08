@@ -121,6 +121,7 @@ async def _fetch_stats_for_post(post: Post) -> dict:
                 "saves": result.saves,
                 "post_type": result.post_type,
                 "error": result.error,
+                "_instagram_media_id": result.media_id,  # сохраняем для второго прохода
             }
             if result.channel_avg and result.channel_avg.posts_analyzed > 0:
                 stats["channel_avg"] = {
@@ -129,7 +130,12 @@ async def _fetch_stats_for_post(post: Post) -> dict:
                     "avg_comments": result.channel_avg.avg_comments,
                     "posts_analyzed": result.channel_avg.posts_analyzed,
                 }
-            logger.info(f"HikerAPI done: views={result.views}, likes={result.likes}, error={result.error}")
+            logger.info(f"HikerAPI done: views={result.views}, likes={result.likes}, comments={result.comments}, media_id={result.media_id}, error={result.error}")
+            
+            # Instagram комментарии — помечаем для второго прохода если их достаточно
+            if (stats.get("comments") or 0) >= 5 and result.media_id:
+                stats["_needs_comments"] = True
+                logger.info(f"[COMMENTS DEBUG] Instagram post marked for comments collection: {result.comments} comments")
 
         elif post.platform == "youtube" and post.post_url:
             logger.info(f"YouTube: fetching {post.post_url}")
@@ -255,32 +261,69 @@ async def process_mediaplan(mp: MediaPlan, project_name: str = "") -> str:
         pd for pd in posts_data
         if pd and pd.get("stats", {}).get("_needs_comments")
     ]
+    logger.info(f"[COMMENTS DEBUG] Posts needing comments: {len(posts_needing_comments)}")
+    logger.info(f"[COMMENTS DEBUG] PYROGRAM_AVAILABLE: {PYROGRAM_AVAILABLE}")
     for pd in posts_needing_comments:
         pd["stats"].pop("_needs_comments")
 
     if posts_needing_comments:
-        if PYROGRAM_AVAILABLE:
-            # Локально — Pyrogram без ограничений
-            for post_dict in posts_needing_comments:
+        # Разделяем посты по платформам
+        telegram_posts = [pd for pd in posts_needing_comments if pd.get("platform") == "telegram"]
+        instagram_posts = [pd for pd in posts_needing_comments if pd.get("platform") == "instagram"]
+        
+        logger.info(f"[COMMENTS DEBUG] Telegram posts: {len(telegram_posts)}, Instagram posts: {len(instagram_posts)}")
+        
+        # Telegram комментарии
+        if telegram_posts:
+            if PYROGRAM_AVAILABLE:
+                # Локально — Pyrogram без ограничений
+                logger.info(f"[COMMENTS DEBUG] Using Pyrogram for {len(telegram_posts)} Telegram posts")
+                for post_dict in telegram_posts:
+                    url = post_dict.get("post_url", "")
+                    logger.info(f"[COMMENTS DEBUG] Pyrogram fetching: {url}")
+                    result = await pyrogram_tg.get_post_comments(url, limit=5)  # type: ignore
+                    if result.top_comments:
+                        post_dict["stats"]["top_comments"] = result.top_comments
+                        logger.info(f"[COMMENTS DEBUG] Pyrogram success: {len(result.top_comments)} comments for {url}")
+                    else:
+                        logger.warning(f"[COMMENTS DEBUG] Pyrogram no comments: {url}, error: {result.error}")
+            else:
+                # Railway — telegram92, 1 req/min, пауза 61 сек между постами
+                logger.info(f"[COMMENTS DEBUG] Using telegram92 for {len(telegram_posts)} Telegram posts")
+                for idx, post_dict in enumerate(telegram_posts):
+                    if idx > 0:
+                        logger.info(f"[COMMENTS DEBUG] telegram92 rate limit pause 61s before next comments request")
+                        await asyncio.sleep(61)
+                    url = post_dict.get("post_url", "")
+                    logger.info(f"[COMMENTS DEBUG] telegram92 fetching: {url}")
+                    tg_result = await telegram_comments.get_post_comments(url, limit=5)
+                    if tg_result.top_comments:
+                        post_dict["stats"]["top_comments"] = tg_result.top_comments
+                        logger.info(f"[COMMENTS DEBUG] telegram92 success: {len(tg_result.top_comments)} comments")
+                    elif tg_result.error:
+                        logger.warning(f"[COMMENTS DEBUG] telegram92 error: {tg_result.error}")
+                    else:
+                        logger.warning(f"[COMMENTS DEBUG] telegram92 no comments and no error for {url}")
+        
+        # Instagram комментарии
+        if instagram_posts:
+            from src.platforms import instagram_comments
+            logger.info(f"[COMMENTS DEBUG] Fetching Instagram comments for {len(instagram_posts)} posts")
+            for post_dict in instagram_posts:
                 url = post_dict.get("post_url", "")
-                result = await pyrogram_tg.get_post_comments(url, limit=5)  # type: ignore
-                if result.top_comments:
-                    post_dict["stats"]["top_comments"] = result.top_comments
-                    logger.info(f"Pyrogram comments: {len(result.top_comments)} for {url}")
-        else:
-            # Railway — telegram92, 1 req/min, пауза 61 сек между постами
-            for idx, post_dict in enumerate(posts_needing_comments):
-                if idx > 0:
-                    logger.info(f"telegram92 rate limit pause 61s before next comments request")
-                    await asyncio.sleep(61)
-                url = post_dict.get("post_url", "")
-                logger.info(f"telegram92 comments: {url}")
-                tg_result = await telegram_comments.get_post_comments(url, limit=5)
-                if tg_result.top_comments:
-                    post_dict["stats"]["top_comments"] = tg_result.top_comments
-                    logger.info(f"telegram92 comments done: {len(tg_result.top_comments)}")
-                elif tg_result.error:
-                    logger.warning(f"telegram92 comments error: {tg_result.error}")
+                media_id = post_dict.get("stats", {}).get("_instagram_media_id")
+                if not media_id:
+                    logger.warning(f"[COMMENTS DEBUG] Instagram post has no media_id: {url}")
+                    continue
+                logger.info(f"[COMMENTS DEBUG] Instagram fetching comments: {url} (media_id={media_id})")
+                insta_result = await instagram_comments.get_post_comments(media_id, post_url=url, limit=5)
+                if insta_result.top_comments:
+                    post_dict["stats"]["top_comments"] = insta_result.top_comments
+                    logger.info(f"[COMMENTS DEBUG] Instagram success: {len(insta_result.top_comments)} comments")
+                elif insta_result.error:
+                    logger.warning(f"[COMMENTS DEBUG] Instagram error: {insta_result.error}")
+                else:
+                    logger.warning(f"[COMMENTS DEBUG] Instagram no comments for {url}")
 
     # Считаем охват
     # Для экономии используем данные из МП (не из API) — они зафиксированы командой
@@ -397,20 +440,37 @@ async def process_links(
         pd["stats"].pop("_needs_comments")
 
     if posts_needing_comments:
-        if PYROGRAM_AVAILABLE:
-            for post_dict in posts_needing_comments:
+        # Разделяем по платформам
+        telegram_posts = [pd for pd in posts_needing_comments if pd.get("platform") == "telegram"]
+        instagram_posts = [pd for pd in posts_needing_comments if pd.get("platform") == "instagram"]
+        
+        # Telegram
+        if telegram_posts:
+            if PYROGRAM_AVAILABLE:
+                for post_dict in telegram_posts:
+                    url = post_dict.get("post_url", "")
+                    result = await pyrogram_tg.get_post_comments(url, limit=5)  # type: ignore
+                    if result.top_comments:
+                        post_dict["stats"]["top_comments"] = result.top_comments
+            else:
+                for idx, post_dict in enumerate(telegram_posts):
+                    if idx > 0:
+                        await asyncio.sleep(61)
+                    url = post_dict.get("post_url", "")
+                    tg_result = await telegram_comments.get_post_comments(url, limit=5)
+                    if tg_result.top_comments:
+                        post_dict["stats"]["top_comments"] = tg_result.top_comments
+        
+        # Instagram
+        if instagram_posts:
+            from src.platforms import instagram_comments
+            for post_dict in instagram_posts:
                 url = post_dict.get("post_url", "")
-                result = await pyrogram_tg.get_post_comments(url, limit=5)  # type: ignore
-                if result.top_comments:
-                    post_dict["stats"]["top_comments"] = result.top_comments
-        else:
-            for idx, post_dict in enumerate(posts_needing_comments):
-                if idx > 0:
-                    await asyncio.sleep(61)
-                url = post_dict.get("post_url", "")
-                tg_result = await telegram_comments.get_post_comments(url, limit=5)
-                if tg_result.top_comments:
-                    post_dict["stats"]["top_comments"] = tg_result.top_comments
+                media_id = post_dict.get("stats", {}).get("_instagram_media_id")
+                if media_id:
+                    insta_result = await instagram_comments.get_post_comments(media_id, post_url=url, limit=5)
+                    if insta_result.top_comments:
+                        post_dict["stats"]["top_comments"] = insta_result.top_comments
 
     # Суммарный охват из API + разбивка по постам для диагностики
     total_actual = 0

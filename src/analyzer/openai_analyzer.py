@@ -467,27 +467,50 @@ async def analyze_campaign(
         p for p in posts_data
         if p.get("stats", {}).get("top_comments")
     ]
+    
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"[COMMENTS DEBUG] Posts with top_comments in analyzer: {len(posts_with_comments)}")
+    for i, p in enumerate(posts_with_comments):
+        url = p.get("post_url", "unknown")
+        comments_count = len(p.get("stats", {}).get("top_comments", []))
+        logger.info(f"[COMMENTS DEBUG] Post {i+1}: {url} has {comments_count} top_comments")
 
     comments_coro = None
     if posts_with_comments:
+        logger.info(f"[COMMENTS DEBUG] Creating comments_coro for {len(posts_with_comments)} posts")
         comments_coro = _analyze_comments(posts_with_comments)
+    else:
+        logger.warning(f"[COMMENTS DEBUG] No posts with comments - comments block will be skipped")
 
     if comments_coro:
+        logger.info(f"[COMMENTS DEBUG] Running accent_coro and comments_coro in parallel")
         accent_resp, comments_text = await asyncio.gather(accent_coro, comments_coro)
+        logger.info(f"[COMMENTS DEBUG] Comments text length: {len(comments_text) if comments_text else 0}")
     else:
+        logger.info(f"[COMMENTS DEBUG] Running only accent_coro (no comments)")
         accent_resp = await accent_coro
         comments_text = None
 
     result = accent_resp.choices[0].message.content
+    logger.info(f"[COMMENTS DEBUG] Main result length: {len(result)}")
 
     if comments_text:
+        logger.info(f"[COMMENTS DEBUG] Appending comments block to result")
         result += f"\n\n---\n\n{comments_text}"
+        logger.info(f"[COMMENTS DEBUG] Final result length with comments: {len(result)}")
+    else:
+        logger.warning(f"[COMMENTS DEBUG] No comments_text to append")
 
     return result
 
 
 async def _analyze_comments(posts_with_comments: list[dict]) -> str:
     """Отдельный блок — о чём писали люди в комментариях."""
+    
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"[COMMENTS DEBUG] _analyze_comments called with {len(posts_with_comments)} posts")
 
     blocks = []
     # Сохраняем ссылки отдельно — передадим их в итоговый текст напрямую
@@ -498,16 +521,22 @@ async def _analyze_comments(posts_with_comments: list[dict]) -> str:
         platform = p.get("platform", "")
         comments_count = p.get("stats", {}).get("comments", 0) or 0
         top_comments = p.get("stats", {}).get("top_comments", [])
+        logger.info(f"[COMMENTS DEBUG] Processing post {post_url}: {len(top_comments)} top_comments, {comments_count} total")
         if not top_comments:
+            logger.warning(f"[COMMENTS DEBUG] Skipping post {post_url} - no top_comments")
             continue
         comments_text = "\n".join(f'  — «{c[:200]}»' for c in top_comments)
         post_urls.append(post_url)
         blocks.append(
             f"ПОСТ {len(post_urls)} ({platform}), {comments_count} комментариев:\n{comments_text}"
         )
+        logger.info(f"[COMMENTS DEBUG] Added block for post {len(post_urls)}")
 
     if not blocks:
+        logger.warning(f"[COMMENTS DEBUG] No blocks created - returning empty string")
         return ""
+    
+    logger.info(f"[COMMENTS DEBUG] Created {len(blocks)} blocks, sending to OpenAI")
 
     user_message = (
         "Ниже — топ комментарии под постами рекламной кампании. "

@@ -31,6 +31,7 @@ class ChannelAverage:
 class InstagramPostStats:
     post_url: str
     shortcode: Optional[str] = None
+    media_id: Optional[str] = None       # нужен для запроса комментариев
     views: Optional[int] = None          # для видео/рилсов
     likes: Optional[int] = None
     comments: Optional[int] = None
@@ -135,6 +136,9 @@ async def get_post_stats(post_url: str) -> InstagramPostStats:
 
         media = data
 
+        # ID поста для запроса комментариев
+        media_id = media.get("id") or media.get("pk")
+
         # Тип поста
         media_type   = media.get("media_type")
         product_type = media.get("product_type", "")
@@ -168,6 +172,7 @@ async def get_post_stats(post_url: str) -> InstagramPostStats:
     return InstagramPostStats(
         post_url=post_url,
         shortcode=shortcode,
+        media_id=str(media_id) if media_id else None,
         views=views,
         likes=likes,
         comments=comments,
