@@ -33,6 +33,7 @@ class YouTubePostStats:
     views: Optional[int] = None
     likes: Optional[int] = None
     comments: Optional[int] = None
+    top_comments: list[str] = field(default_factory=list)
     channel_title: Optional[str] = None
     channel_id: Optional[str] = None
     channel_avg: Optional[ChannelAverage] = None
@@ -70,6 +71,61 @@ async def _get_uploads_playlist_id(
     if not items:
         return None
     return items[0].get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads")
+
+
+async def _get_top_comments(
+    session: aiohttp.ClientSession,
+    video_id: str,
+    limit: int = 10,
+) -> list[str]:
+    """
+    Получает топ комментариев к видео через commentThreads.list API.
+    Стоимость: 1 unit за запрос.
+    Сортировка: по релевантности (relevance).
+    """
+    try:
+        params = {
+            "key": YOUTUBE_API_KEY,
+            "videoId": video_id,
+            "part": "snippet",
+            "order": "relevance",  # топ по релевантности
+            "maxResults": limit,
+            "textFormat": "plainText",
+        }
+        async with session.get(
+            f"{YOUTUBE_API_BASE}/commentThreads", params=params
+        ) as resp:
+            data = await resp.json()
+        
+        # Проверка на ошибки API
+        if "error" in data:
+            error_msg = data["error"].get("message", "Unknown error")
+            logger.warning(f"YouTube comments API error: {error_msg}")
+            return []
+        
+        items = data.get("items", [])
+        comments = []
+        
+        for item in items:
+            try:
+                comment_text = (
+                    item.get("snippet", {})
+                    .get("topLevelComment", {})
+                    .get("snippet", {})
+                    .get("textDisplay", "")
+                )
+                comment_text = comment_text.strip()
+                if comment_text and len(comment_text) > 3:
+                    comments.append(comment_text)
+            except (KeyError, AttributeError):
+                continue
+        
+        logger.info(f"YouTube comments: got {len(comments)} for video_id={video_id}")
+        return comments
+        
+    except Exception as e:
+        logger.warning(f"YouTube comments error: {e}")
+        return []
 
 
 async def _get_channel_average(
@@ -186,9 +242,15 @@ async def get_post_stats(post_url: str) -> YouTubePostStats:
         if channel_id:
             channel_avg = await _get_channel_average(session, channel_id, video_id)
 
+        # Топ комментарии — собираем если их >= 5
+        top_comments = []
+        if comments and comments >= 5:
+            logger.info(f"YouTube: fetching comments for video_id={video_id} (has {comments} comments)")
+            top_comments = await _get_top_comments(session, video_id, limit=10)
+
         logger.info(
-            f"YouTube done: video_id={video_id}, views={views}, "
-            f"channel={channel_title}, avg_views={channel_avg.avg_views}"
+            f"YouTube done: video_id={video_id}, views={views}, comments={comments}, "
+            f"top_comments={len(top_comments)}, channel={channel_title}, avg_views={channel_avg.avg_views}"
         )
 
     return YouTubePostStats(
@@ -197,6 +259,7 @@ async def get_post_stats(post_url: str) -> YouTubePostStats:
         views=views,
         likes=likes,
         comments=comments,
+        top_comments=top_comments,
         channel_title=channel_title,
         channel_id=channel_id,
         channel_avg=channel_avg,

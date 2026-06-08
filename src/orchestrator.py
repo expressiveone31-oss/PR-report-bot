@@ -146,6 +146,7 @@ async def _fetch_stats_for_post(post: Post) -> dict:
                 "views": result.views,
                 "likes": result.likes,
                 "comments": result.comments,
+                "top_comments": result.top_comments,  # YouTube собирает комментарии сразу
                 "error": result.error,
             }
             if result.channel_avg and result.channel_avg.posts_analyzed > 0:
@@ -155,7 +156,7 @@ async def _fetch_stats_for_post(post: Post) -> dict:
                     "avg_comments": result.channel_avg.avg_comments,
                     "posts_analyzed": result.channel_avg.posts_analyzed,
                 }
-            logger.info(f"YouTube done: views={result.views}, channel={result.channel_title}, error={result.error}")
+            logger.info(f"YouTube done: views={result.views}, comments={result.comments}, top_comments={len(result.top_comments)}, channel={result.channel_title}, error={result.error}")
 
         elif post.platform == "tiktok" and post.post_url:
             logger.info(f"TikTok: fetching {post.post_url}")
