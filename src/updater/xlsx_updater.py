@@ -207,23 +207,78 @@ async def update_xlsx(xlsx_bytes: bytes) -> tuple[bytes, dict]:
         logger.info(f"Sheet '{sheet.title}': url_col={col_url} ('{headers[col_url]}'), reach_col={col_reach} ('{headers[col_reach]}')")
 
         # Собираем все URL для обработки.
-        # Останавливаемся на строке "Итого" — дальше менеджерский блок.
+        # Логика остановки:
+        # 1. На "Итого:" — приостанавливаемся и проверяем: есть ли ниже органика?
+        # 2. Если в ближайших 5 строках после "Итого:" встречается "Органика" или
+        #    повторный заголовок "Ссылка на публикацию" — продолжаем сбор URL.
+        # 3. Финальные стоп-слова: "Итого с органикой", "Сумма с НДС", "Общий прогнозируемый".
+        FINAL_STOP_KEYWORDS = (
+            "итого с органикой", "итого с органики", "сумма с учетом ндс",
+            "сумма с ндс", "общий прогнозируемый", "общий прогноз",
+            "фактический общий охват", "стоимость размещений",
+        )
+        ORGANIC_MARKERS = ("органика", "ссылка на публикацию", "ссылка на пост")
+
         url_rows = []
-        for row_idx in range(header_row_idx + 1, sheet.max_row + 1):
-            # Проверяем первые 3 ячейки строки на стоп-слова
-            stop = False
+        row_idx = header_row_idx + 1
+        max_row = sheet.max_row
+
+        while row_idx <= max_row:
+            # Собираем содержимое всей строки в одну строку для проверки маркеров
+            row_text_parts = []
+            for col_check in range(1, min(sheet.max_column, 15) + 1):
+                cell_val = str(sheet.cell(row=row_idx, column=col_check).value or "").strip()
+                if cell_val:
+                    row_text_parts.append(cell_val.lower())
+            row_text = " ".join(row_text_parts)
+
+            # 1. Проверяем финальные стоп-слова — если есть, выходим
+            if any(kw in row_text for kw in FINAL_STOP_KEYWORDS):
+                logger.info(f"Updater: hit final stop at row {row_idx}: '{row_text[:80]}'")
+                break
+
+            # 2. Проверяем промежуточный "Итого:" (не финальный)
+            is_intermediate_total = False
             for col_check in range(1, 4):
                 cell_val = str(sheet.cell(row=row_idx, column=col_check).value or "").strip().lower()
-                if cell_val.startswith("итого") or cell_val.startswith("общий"):
-                    stop = True
+                # Триггер "Итого" без "с органикой" и без "общий"
+                if (cell_val.startswith("итого") and "органик" not in cell_val) or cell_val.startswith("итого (охват)"):
+                    is_intermediate_total = True
                     break
-            if stop:
-                break
-            # Проверяем ячейку с URL
+
+            if is_intermediate_total:
+                # Заглядываем в следующие 5 строк — есть ли там органика?
+                organic_found = False
+                for look_ahead in range(1, 6):
+                    check_idx = row_idx + look_ahead
+                    if check_idx > max_row:
+                        break
+                    check_row_parts = []
+                    for col_check in range(1, min(sheet.max_column, 15) + 1):
+                        cv = str(sheet.cell(row=check_idx, column=col_check).value or "").strip().lower()
+                        if cv:
+                            check_row_parts.append(cv)
+                    check_text = " ".join(check_row_parts)
+                    if any(m in check_text for m in ORGANIC_MARKERS):
+                        organic_found = True
+                        logger.info(f"Updater: organic block detected after 'Итого' at row {row_idx} (marker at row {check_idx})")
+                        break
+
+                if not organic_found:
+                    # Органики нет — останавливаемся как раньше
+                    logger.info(f"Updater: hit 'Итого' at row {row_idx}, no organic below — stopping")
+                    break
+                # Органика есть — продолжаем сканировать
+                row_idx += 1
+                continue
+
+            # 3. Проверяем ячейку с URL
             cell_url = sheet.cell(row=row_idx, column=col_url + 1)
             url = str(cell_url.value).strip() if cell_url.value else ""
             if _is_post_url(url):
                 url_rows.append((row_idx, url))
+
+            row_idx += 1
 
         if not url_rows:
             continue
@@ -245,19 +300,23 @@ async def update_xlsx(xlsx_bytes: bytes) -> tuple[bytes, dict]:
             for (row_idx, _), result in zip(other_rows, results):
                 views_map[row_idx] = result
 
-        # Проставляем в таблицу
+        # Проставляем в таблицу.
+        # number_format сбрасываем в 'General' чтобы вставить число "как есть"
+        # без наследуемого формата (₽, тысячные пробелы, копейки и т.п.)
         for row_idx, url in url_rows:
             views, status = views_map.get(row_idx, (None, "error"))
             cell_reach = sheet.cell(row=row_idx, column=col_reach + 1)
 
             if status == "ok" and views is not None:
                 cell_reach.value = views
+                cell_reach.number_format = 'General'
                 cell_reach.fill = UPDATED_FILL
                 stats["updated"] += 1
                 logger.info(f"Updated row {row_idx}: {views:,} for {url}")
             elif status == "deleted" and views is not None:
                 # Пост удалён — проставляем последний известный охват, розовый цвет
                 cell_reach.value = views
+                cell_reach.number_format = 'General'
                 cell_reach.fill = DELETED_FILL
                 stats["deleted"] += 1
                 logger.info(f"Deleted post row {row_idx}: last known {views:,} for {url}")

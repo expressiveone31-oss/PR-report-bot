@@ -122,10 +122,13 @@ def parse_with_schema(content: str, schema: CsvSchema) -> MediaPlan:
             continue
 
         # --- Paid-блок ---
-        # Строка «Итого» завершает paid-блок — всё что ниже игнорируем
+        # Строка «Итого:» завершает paid-блок, но НЕ всю таблицу:
+        # ниже может быть блок Органики. Поэтому не break, а continue —
+        # парсер пройдёт дальше и доберётся до триггера органики (если есть).
+        # Если органики нет — _is_skip_row отсечёт мусорные строки ниже Итого.
         first = row[0].strip().lower() if row else ""
         if first.startswith("итого") or first.startswith("общий"):
-            break
+            continue
 
         if _is_skip_row(row):
             continue
