@@ -28,7 +28,13 @@ def xlsx_bytes_to_csv(xlsx_bytes: bytes) -> tuple[str, str]:
 
     sheet = wb.worksheets[0]
     sheet_name = sheet.title
-    logger.info(f"xlsx: reading sheet '{sheet_name}', dims={sheet.dimensions}")
+    # dims недоступен в ReadOnlyWorksheet начиная с некоторых версий openpyxl,
+    # поэтому ловим AttributeError и просто пропускаем логирование dimensions
+    try:
+        dims = sheet.dimensions
+    except AttributeError:
+        dims = "n/a (read-only mode)"
+    logger.info(f"xlsx: reading sheet '{sheet_name}', dims={dims}")
 
     output = io.StringIO()
     writer = csv.writer(output)
