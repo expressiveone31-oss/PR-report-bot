@@ -156,7 +156,11 @@ async def cmd_update(message: Message, state: FSMContext) -> None:
     """Режим обновления охватов в xlsx."""
     await state.clear()
     await message.answer(
-        "Скинь *Excel-файл (.xlsx)* с медиапланом.\n\n"
+        "Скинь *Excel-файл (.xlsx)* с медиапланом или *ссылку* на него.\n\n"
+        "Что понимаю по ссылке:\n"
+        "• Google Sheets — нужен открытый доступ по ссылке (Читатель)\n"
+        "• Яндекс.Диск — публичная ссылка на файл\n"
+        "• Прямая ссылка на .xlsx или .csv\n\n"
         "Я пройдусь по ссылкам на публикации через API и проставлю актуальные охваты прямо в таблицу.\n\n"
         "Верну обновлённый файл с пометкой *\\_updated* в имени.",
         parse_mode="Markdown",
@@ -164,26 +168,16 @@ async def cmd_update(message: Message, state: FSMContext) -> None:
     await state.set_state(UpdateStates.waiting_xlsx)
 
 
-@dp.message(UpdateStates.waiting_xlsx, F.document)
-async def got_xlsx_for_update(message: Message, state: FSMContext) -> None:
-    doc = message.document
-    fname = doc.file_name or ""
-    if not (fname.lower().endswith(".xlsx") or fname.lower().endswith(".csv")):
-        await message.answer("Нужен файл .xlsx или .csv. Попробуй ещё раз.", parse_mode=None)
-        return
-
-    await message.answer("Читаю файл и иду за данными через API. Это может занять несколько минут...", parse_mode=None)
-
-    file = await bot.get_file(doc.file_id)
-    file_bytes_io = await bot.download_file(file.file_path)
-    raw_bytes = file_bytes_io.read()
-
+async def _process_update_bytes(message: Message, state: FSMContext,
+                                 raw_bytes: bytes, fname: str) -> None:
+    """
+    Общая логика обновления охватов: принимает готовые bytes + предполагаемое имя,
+    возвращает пользователю обновлённый файл.
+    """
     # Если CSV — конвертируем в xlsx чтобы вернуть xlsx
     if fname.lower().endswith(".csv"):
         try:
             import openpyxl
-            from src.parsers.xlsx_to_csv import xlsx_bytes_to_csv
-            # CSV → xlsx через openpyxl
             import csv, io as _io
             wb = openpyxl.Workbook()
             ws = wb.active
@@ -208,6 +202,8 @@ async def got_xlsx_for_update(message: Message, state: FSMContext) -> None:
 
     # Формируем имя файла с _updated
     base = os.path.splitext(fname)[0]
+    # Убираем лишние пробелы и лишние точки
+    base = base.strip() or "mediaplan"
     out_fname = f"{base}_updated.xlsx"
 
     await state.clear()
@@ -224,9 +220,91 @@ async def got_xlsx_for_update(message: Message, state: FSMContext) -> None:
     )
 
 
+@dp.message(UpdateStates.waiting_xlsx, F.document)
+async def got_xlsx_for_update(message: Message, state: FSMContext) -> None:
+    doc = message.document
+    fname = doc.file_name or ""
+    if not (fname.lower().endswith(".xlsx") or fname.lower().endswith(".csv")):
+        await message.answer("Нужен файл .xlsx или .csv. Попробуй ещё раз.", parse_mode=None)
+        return
+
+    await message.answer(
+        "Читаю файл и иду за данными через API. Это может занять несколько минут...",
+        parse_mode=None,
+    )
+
+    file = await bot.get_file(doc.file_id)
+    file_bytes_io = await bot.download_file(file.file_path)
+    raw_bytes = file_bytes_io.read()
+
+    await _process_update_bytes(message, state, raw_bytes, fname)
+
+
+@dp.message(UpdateStates.waiting_xlsx, F.text)
+async def got_url_for_update(message: Message, state: FSMContext) -> None:
+    """Обработка ссылки на МП (Google Sheets, Яндекс.Диск, прямая xlsx/csv)."""
+    from src.parsers.url_downloader import is_supported_url, download_from_url
+
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer(
+            "Скинь файл .xlsx / .csv или ссылку на медиаплан.",
+            parse_mode=None,
+        )
+        return
+
+    # Если это не ссылка — сообщаем и ждём дальше
+    if not text.startswith(("http://", "https://")):
+        await message.answer(
+            "Жду файл .xlsx / .csv или ссылку.\n"
+            "Ссылка должна начинаться с http:// или https://\n\n"
+            "Или напиши /update чтобы начать заново.",
+            parse_mode=None,
+        )
+        return
+
+    if not is_supported_url(text):
+        await message.answer(
+            "Не понимаю эту ссылку. Поддерживаю:\n"
+            "• Google Sheets\n"
+            "• Яндекс.Диск\n"
+            "• Прямую ссылку на .xlsx или .csv",
+            parse_mode=None,
+        )
+        return
+
+    await message.answer("Скачиваю файл по ссылке...", parse_mode=None)
+
+    result = await download_from_url(text)
+    if result.error:
+        await message.answer(f"Не удалось скачать файл: {result.error}", parse_mode=None)
+        return
+
+    if not result.file_bytes:
+        await message.answer("Скачал пустой файл. Проверь ссылку.", parse_mode=None)
+        return
+
+    fname = result.filename or "mediaplan.xlsx"
+    logger.info(
+        f"Downloaded from {result.source}: {len(result.file_bytes)} bytes, fname={fname}"
+    )
+
+    await message.answer(
+        f"Файл получен ({len(result.file_bytes) // 1024} KB). "
+        "Иду за данными через API. Это может занять несколько минут...",
+        parse_mode=None,
+    )
+
+    await _process_update_bytes(message, state, result.file_bytes, fname)
+
+
 @dp.message(UpdateStates.waiting_xlsx)
 async def update_wrong_file(message: Message, state: FSMContext) -> None:
-    await message.answer("Жду файл .xlsx или .csv. Скинь файл или напиши /update чтобы начать заново.", parse_mode=None)
+    await message.answer(
+        "Жду файл .xlsx / .csv или ссылку на медиаплан. "
+        "Или напиши /update чтобы начать заново.",
+        parse_mode=None,
+    )
 
 
 @dp.message(CommandStart())
