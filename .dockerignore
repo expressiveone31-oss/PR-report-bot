@@ -1,0 +1,30 @@
+# Никогда не таскаем секреты в образ
+.env
+.env.*
+!.env.example
+session/
+*.session
+*.session-journal
+
+# Локальные артефакты
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# Git и вспомогательное
+.git/
+.gitignore
+.gitattributes
+
+# Тестовые скрипты и данные — прод не нужны
+test_*.py
+tests/
+railway_diagnostic.py
+export_*.csv
+
+# IDE
+.vscode/
+.idea/
+*.swp
