@@ -7,7 +7,11 @@ import asyncio
 import logging
 from src.parsers.mediaplan import MediaPlan, Post
 import os
-from src.platforms import vk, telemetr, tgstat, hikerapi, pyrogram_tg, youtube, tiktok, twitter, telegram_comments
+from src.platforms import vk, telemetr, tgstat, hikerapi, pyrogram_tg, youtube, tiktok, twitter, twitter241, telegram_comments
+from src.config import TWITTER_PROVIDER
+
+# Единый вход в Twitter API — переключается через TWITTER_PROVIDER
+_twitter_module = twitter241 if TWITTER_PROVIDER == "twitter241" else twitter
 from src.analyzer.openai_analyzer import analyze_campaign
 
 # Pyrogram доступен только если есть локальный файл сессии.
@@ -182,8 +186,8 @@ async def _fetch_stats_for_post(post: Post) -> dict:
             logger.info(f"TikTok done: views={result.views}, channel={result.channel_title}, error={result.error}")
 
         elif post.platform == "twitter" and post.post_url:
-            logger.info(f"Twitter: fetching {post.post_url}")
-            result = await twitter.get_post_stats(post.post_url)
+            logger.info(f"Twitter: fetching {post.post_url} via {TWITTER_PROVIDER}")
+            result = await _twitter_module.get_post_stats(post.post_url)
             if result.channel_title and post.name.startswith("http"):
                 post.name = result.channel_title
             stats = {
@@ -193,6 +197,10 @@ async def _fetch_stats_for_post(post: Post) -> dict:
                 "comments": result.replies,
                 "error": result.error,
             }
+            # top_comments — только у twitter241 (у старого api45 этого поля нет)
+            top_comments = getattr(result, "top_comments", []) or []
+            if top_comments:
+                stats["top_comments"] = top_comments
             if result.channel_avg and result.channel_avg.posts_analyzed > 0:
                 stats["channel_avg"] = {
                     "avg_views": result.channel_avg.avg_views,
@@ -201,7 +209,10 @@ async def _fetch_stats_for_post(post: Post) -> dict:
                     "avg_comments": result.channel_avg.avg_replies,
                     "posts_analyzed": result.channel_avg.posts_analyzed,
                 }
-            logger.info(f"Twitter done: views={result.views}, likes={result.likes}, error={result.error}")
+            logger.info(
+                f"Twitter done: views={result.views}, likes={result.likes}, "
+                f"top_comments={len(top_comments)}, error={result.error}"
+            )
 
         else:
             stats = {"error": f"Платформа {post.platform!r} не поддерживается или нет ссылки на пост"}

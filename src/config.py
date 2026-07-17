@@ -18,3 +18,7 @@ PYROGRAM_SESSION_STRING = os.getenv("SESSION_STRING", "")
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "")
 RAPIDAPI_KEY = os.getenv("TIKTOK_RAPIDAPI_KEY", "")  # универсальный RapidAPI ключ
 TIKTOK_RAPIDAPI_KEY = RAPIDAPI_KEY  # обратная совместимость
+
+# Twitter/X provider: "twitter-api45" (по умолчанию) или "twitter241"
+# twitter241 может отдавать тексты реплаев, старый api45 — не отдаёт
+TWITTER_PROVIDER = os.getenv("TWITTER_PROVIDER", "twitter-api45")
