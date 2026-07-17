@@ -916,13 +916,79 @@ async def _set_bot_commands() -> None:
     ])
 
 
+# --- Graceful shutdown -----------------------------------------------------
+# Railway при деплое шлёт контейнеру SIGTERM и даёт ~30 секунд до SIGKILL.
+# Без обработки SIGTERM aiogram резко обрывает in-flight хендлеры, из-за
+# чего у пользователя в чате висит «Иду за данными…» и запрос теряется.
+#
+# Стратегия: ловим SIGTERM/SIGINT → останавливаем polling (новых апдейтов
+# больше не берём) → ждём завершения текущих хендлеров с таймаутом ~25 сек
+# (чуть меньше 30, чтобы уложиться до SIGKILL) → выходим чисто.
+
+SHUTDOWN_GRACE_SECONDS = 25
+
+
+async def _shutdown(sig_name: str) -> None:
+    """Инициирует graceful stop polling'а. Логируется каким сигналом дёрнули."""
+    logger.warning(
+        f"Received {sig_name}, stopping polling. Will wait up to "
+        f"{SHUTDOWN_GRACE_SECONDS}s for in-flight handlers to finish."
+    )
+    # Останавливаем polling: новых апдейтов не берём.
+    # aiogram.Dispatcher.stop_polling() устанавливает флаг остановки —
+    # start_polling() возвращается когда текущие хендлеры завершатся.
+    await dp.stop_polling()
+
+
 async def main() -> None:
+    import signal
+
     logger.info("Bot starting...")
     try:
         await _set_bot_commands()
     except Exception as e:
         logger.warning(f"Failed to set bot commands menu: {e}")
-    await dp.start_polling(bot)
+
+    # Регистрируем обработчики сигналов в event loop.
+    # На Linux (Railway) SIGTERM работает штатно; на Windows он недоступен.
+    loop = asyncio.get_running_loop()
+    for sig_enum, sig_name in ((signal.SIGTERM, "SIGTERM"), (signal.SIGINT, "SIGINT")):
+        try:
+            loop.add_signal_handler(
+                sig_enum,
+                lambda name=sig_name: asyncio.create_task(_shutdown(name)),
+            )
+        except (NotImplementedError, RuntimeError):
+            # Windows не поддерживает add_signal_handler — не критично.
+            pass
+
+    try:
+        # start_polling блокирует до stop_polling() или KeyboardInterrupt.
+        # handle_signals=False — берём управление сигналами на себя выше.
+        # close_bot_session=True (по умолчанию) — aiogram сам закроет aiohttp-сессию.
+        await dp.start_polling(bot, handle_signals=False)
+    finally:
+        # После выхода из start_polling ждём завершения in-flight хендлеров.
+        # handle_as_tasks=True (дефолт) — каждый апдейт живёт в отдельной задаче,
+        # и здесь мы отбираем именно их и даём им доработать.
+        pending = [
+            t for t in asyncio.all_tasks()
+            if t is not asyncio.current_task() and not t.done()
+        ]
+        if pending:
+            logger.info(f"Waiting for {len(pending)} in-flight tasks (max {SHUTDOWN_GRACE_SECONDS}s)...")
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True),
+                    timeout=SHUTDOWN_GRACE_SECONDS,
+                )
+                logger.info("All in-flight tasks completed cleanly.")
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Timed out after {SHUTDOWN_GRACE_SECONDS}s — some tasks "
+                    "still running, forcing shutdown."
+                )
+        logger.info("Bot stopped.")
 
 
 if __name__ == "__main__":
