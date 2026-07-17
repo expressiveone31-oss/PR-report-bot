@@ -62,28 +62,88 @@ PLATFORM_NAMES = {
 }
 
 
-def _aggregate_by_platform(posts_data: list[dict]) -> list[dict]:
+def _clean_channel_name(name: str, platform: str) -> str:
     """
-    Группирует посты по платформам, считает total views и кол-во публикаций.
-    Возвращает список: [{platform, name, reach, count}, ...] отсортированный по reach.
+    Приводит название канала к виду 'ВКонтакте — «Твои мужики»'.
+    Если name — это ссылка (без имени), оставляем только платформу.
     """
-    agg: dict[str, dict] = {}
+    name = (name or "").strip()
+    platform_label = PLATFORM_NAMES.get(platform, platform.capitalize())
+
+    # name пустой или это ссылка → просто платформа
+    if not name or name.startswith(("http://", "https://")):
+        return platform_label
+
+    # уже с платформой в начале — не дублируем
+    if name.lower().startswith(platform_label.lower()):
+        return name
+
+    # красиво оборачиваем в ёлочки, если ещё не в кавычках
+    if not (name.startswith(("«", '"', "«")) or name.startswith("@")):
+        name = f"«{name}»"
+
+    return f"{platform_label} — {name}"
+
+
+def _aggregate_by_channel(posts_data: list[dict], max_rows: int = 5) -> list[dict]:
+    """
+    Группирует посты ПО КАНАЛУ (не по платформе): один канал = одна строка.
+
+    Возвращает список: [{platform, channel, name, reach, count}, ...],
+    отсортированный по reach убыв. Если каналов больше max_rows —
+    остальные схлопываем в строку "Другие площадки".
+    """
+    # ключ = (platform, channel_name_normalized)
+    agg: dict[tuple[str, str], dict] = {}
     for post in posts_data:
         platform = post.get("platform") or "unknown"
+        raw_name = post.get("name") or ""
         stats = post.get("stats") or {}
-        views = stats.get("views") or 0
+        views = int(stats.get("views") or 0)
 
-        entry = agg.setdefault(platform, {"platform": platform, "reach": 0, "count": 0})
-        entry["reach"] += int(views or 0)
+        # Ключ группировки: если у поста нет осмысленного имени (только url),
+        # группируем по платформе. Иначе — по паре (platform, name).
+        if not raw_name or raw_name.startswith(("http://", "https://")):
+            key = (platform, "")
+            display_name = _clean_channel_name("", platform)
+        else:
+            key = (platform, raw_name.lower())
+            display_name = _clean_channel_name(raw_name, platform)
+
+        entry = agg.setdefault(key, {
+            "platform": platform,
+            "channel": raw_name,
+            "name": display_name,
+            "reach": 0,
+            "count": 0,
+        })
+        entry["reach"] += views
         entry["count"] += 1
 
-    # человекочитаемое имя + сортировка по reach
-    result = []
-    for platform, e in agg.items():
-        e["name"] = PLATFORM_NAMES.get(platform, platform.capitalize())
-        result.append(e)
-    result.sort(key=lambda x: x["reach"], reverse=True)
-    return result
+    # Сортируем по reach убыв.
+    all_rows = sorted(agg.values(), key=lambda x: x["reach"], reverse=True)
+
+    if len(all_rows) <= max_rows:
+        return all_rows
+
+    # Иначе оставляем топ-N, остальное сворачиваем в "Другие площадки"
+    top = all_rows[:max_rows - 1]
+    rest = all_rows[max_rows - 1:]
+    others_reach = sum(r["reach"] for r in rest)
+    others_count = sum(r["count"] for r in rest)
+    top.append({
+        "platform": "other",
+        "channel": "",
+        "name": f"Другие площадки ({len(rest)})",
+        "reach": others_reach,
+        "count": others_count,
+    })
+    return top
+
+
+# Обратная совместимость (если где-то ещё вызывается по старому имени)
+def _aggregate_by_platform(posts_data: list[dict]) -> list[dict]:
+    return _aggregate_by_channel(posts_data)
 
 
 # --- Fallback без ИИ -------------------------------------------------------
@@ -99,7 +159,7 @@ def deterministic_compose(
     Собирает CardData из данных отчёта без ИИ.
     Fallback, если OpenAI недоступен или упал.
     """
-    agg = _aggregate_by_platform(posts_data)
+    agg = _aggregate_by_channel(posts_data)
 
     rows: list[CardRow] = []
     for i, e in enumerate(agg):
@@ -164,15 +224,18 @@ def _split_title(name: str, max_len: int = 24) -> list[str]:
 
 SYSTEM_PROMPT = """Ты — редактор Кинопоиска, готовишь итоговую карточку отчёта
 о посевной кампании. Данные приходят в виде JSON: название проекта,
-общий охват, разбивка по площадкам с числом публикаций и охватами.
+общий охват, разбивка по КАНАЛАМ (каждый канал = сообщество/страница/аккаунт
+в социальной сети) с числом публикаций и охватами.
 
 Твоя задача — сформулировать «медийный» заголовок и правильно собрать структуру.
 
 ⚠️ САМОЕ ВАЖНОЕ: НЕ ПРИДУМЫВАЙ ФАКТЫ.
-- НЕ добавляй названия каналов/сообществ, которые не переданы в данных.
+- НЕ добавляй названия каналов/сообществ, которых нет в channels[].
 - НЕ выдумывай тематику проекта, если она не следует из project_name.
 - НЕ вписывай цитаты, мемы, аудитории и прочие детали, которых нет во входе.
-- Если данных мало — заголовок должен быть общим и нейтральным.
+- Названия каналов бери ДОСЛОВНО из channels[i].name — символ в символ.
+  Даже если тебе кажется, что «ВКонтакте» стоило бы дописать —
+  НЕ дописывай ничего от себя.
 
 ПРАВИЛА:
 1. Заголовок (1-2 строки) — короткий, ёмкий. Пример: "Итоги посева",
@@ -183,13 +246,15 @@ SYSTEM_PROMPT = """Ты — редактор Кинопоиска, готови�
 3. Hero — общий охват в человекочитаемом виде: "142 327". Возьми total_reach
    и просто отформатируй числом через пробел.
 4. Subtitle — техническая строка вроде "просмотров · 57 публикаций".
-5. Разбивка (rows): выбери 1 самую сильную площадку (максимальный reach)
-   и пометь её highlight=true. Остальные — highlight=false.
-6. Названия площадок в rows — БЕРИ ТОЧНО из входа (поле platforms[i].name).
-   НЕ дополняй никакими «Твои мужики», «@channel» и т.п.
+5. Разбивка (rows): один канал = одна строка. Порядок как в channels[]
+   (уже отсортирован по reach убыв.). Выбери 1 самый сильный канал (первый)
+   и пометь его highlight=true. Остальные — highlight=false.
+6. name в rows — БЕРИ ДОСЛОВНО из channels[i].name.
 7. Tag под названием — просто число публикаций с правильным падежом:
    "14 публикаций", "1 публикация", "21 публикация".
-8. Число охвата (reach) — форматируй как в hero, через пробел: "72 115".
+   Значение бери из channels[i].publications.
+8. Число охвата (reach) — форматируй через пробел, например "72 115".
+   Значение бери из channels[i].reach.
 9. Footer — короткая техническая строка, например:
    "Отчёт по проекту · охват фактический на момент выгрузки".
 
@@ -200,8 +265,8 @@ SYSTEM_PROMPT = """Ты — редактор Кинопоиска, готови�
   "hero": "142 327",
   "subtitle": "просмотров · 57 публикаций",
   "rows": [
-    {"name": "ВКонтакте", "tag": "14 публикаций", "reach": "72 115", "highlight": true},
-    {"name": "X (Twitter)", "tag": "21 публикация", "reach": "42 439", "highlight": false}
+    {"name": "ВКонтакте — «Твои мужики»", "tag": "14 публикаций", "reach": "72 115", "highlight": true},
+    {"name": "Telegram", "tag": "19 публикаций", "reach": "19 075", "highlight": false}
   ],
   "footer": "Отчёт по проекту · охват фактический на момент выгрузки"
 }
@@ -229,13 +294,13 @@ async def compose_card_ai(
             return None
 
     # Подготовка данных для модели
-    agg = _aggregate_by_platform(posts_data)
+    agg = _aggregate_by_channel(posts_data)
     user_input = {
         "project_name": project_name or "",
         "total_reach": total_reach,
         "total_posts": total_posts,
-        "platforms": [
-            {"name": e["name"], "count": e["count"], "reach": e["reach"]}
+        "channels": [
+            {"name": e["name"], "publications": e["count"], "reach": e["reach"]}
             for e in agg
         ],
     }
