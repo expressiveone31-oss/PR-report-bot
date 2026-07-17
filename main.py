@@ -529,6 +529,37 @@ def _picture_confirm_kb() -> InlineKeyboardMarkup:
     ])
 
 
+def _card_from_dict(d: dict):
+    """Восстанавливает CardData из FSM-словаря (asdict-сериализация)."""
+    from src.card import CardData, CardRow
+    rows = [CardRow(**r) for r in (d.get("rows") or [])]
+    return CardData(
+        kicker=d.get("kicker", "") or "",
+        title_lines=list(d.get("title_lines") or []),
+        hero=d.get("hero", "") or "",
+        subtitle=d.get("subtitle", "") or "",
+        rows=rows,
+        footer=d.get("footer", "") or "",
+        breakdown_label=d.get("breakdown_label") or "РАЗБИВКА ПО ПЛОЩАДКАМ",
+        reach_label=d.get("reach_label") or "ОХВАТ",
+    )
+
+
+async def _clear_preview_keyboard(chat_id: int, message_id: int) -> None:
+    """
+    Снимает inline-клавиатуру со старого сообщения-превью.
+    Игнорирует любые ошибки (сообщение могли удалить, слишком старое и т.п.).
+    """
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=chat_id,
+            message_id=message_id,
+            reply_markup=None,
+        )
+    except Exception:
+        pass
+
+
 @dp.message(Command("picture"))
 async def cmd_picture(message: Message, state: FSMContext) -> None:
     """Запуск режима генерации брендовой карточки из свободного текста."""
@@ -581,16 +612,23 @@ async def got_picture_text(message: Message, state: FSMContext) -> None:
 
     preview = format_preview(card)
 
-    # Сохраняем разобранный card в state и просим подтверждение
-    # CardData — dataclass, сериализуем в dict для FSM хранилища
+    # Сохраняем разобранный card в state и просим подтверждение.
+    # CardData — dataclass, сериализуем в dict для FSM хранилища.
     from dataclasses import asdict
-    await state.update_data(card=asdict(card))
-    await state.set_state(PictureStates.waiting_confirm)
 
-    await message.answer(
-        "Вот что понял:\n\n" + preview + "\n\nСгенерить карточку?",
+    sent = await message.answer(
+        "Вот что понял:\n\n"
+        + preview
+        + "\n\nСгенерить карточку? Если есть правки — отправь их "
+        "обратным сообщением, я пересоберу.",
         reply_markup=_picture_confirm_kb(),
     )
+
+    await state.update_data(
+        card=asdict(card),
+        preview_message_id=sent.message_id,
+    )
+    await state.set_state(PictureStates.waiting_confirm)
 
 
 @dp.callback_query(PictureStates.waiting_confirm, F.data == "picture:cancel")
@@ -615,20 +653,10 @@ async def picture_confirm(cb: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
         return
 
-    # Ретайпим CardData
-    from src.card import CardData, CardRow, render_card
+    # Ретайпим CardData из FSM-словаря
+    from src.card import render_card
     try:
-        rows = [CardRow(**r) for r in (card_dict.get("rows") or [])]
-        card = CardData(
-            kicker=card_dict.get("kicker", ""),
-            title_lines=list(card_dict.get("title_lines") or []),
-            hero=card_dict.get("hero", ""),
-            subtitle=card_dict.get("subtitle", ""),
-            rows=rows,
-            footer=card_dict.get("footer", ""),
-            breakdown_label=card_dict.get("breakdown_label") or "РАЗБИВКА ПО ПЛОЩАДКАМ",
-            reach_label=card_dict.get("reach_label") or "ОХВАТ",
-        )
+        card = _card_from_dict(card_dict)
     except Exception as e:
         logger.error(f"picture_confirm: failed to restore CardData: {e}", exc_info=True)
         await cb.answer("Данные испорчены, попробуй /picture заново", show_alert=True)
@@ -670,11 +698,85 @@ async def picture_confirm(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer("Готово")
 
 
+@dp.message(PictureStates.waiting_confirm, F.text)
+async def got_picture_edits(message: Message, state: FSMContext) -> None:
+    """
+    Пользователь прислал текст в ответ на превью — трактуем как правки.
+    Прогоняем через ИИ (revise_card_from_text), при успехе — показываем
+    новое превью, старое лишаем кнопок. При неудаче — просим переформулировать,
+    ничего не меняем в state.
+    """
+    text = (message.text or "").strip()
+    # Команды типа /cancel уже перехвачены выше в файле — сюда не долетают.
+    # Но если человек начал текст с '/' (например /picture) — вежливо отказываем.
+    if not text or text.startswith("/"):
+        await message.answer(
+            "Не понял. Если хочешь начать заново — /cancel, потом /picture. "
+            "Или просто напиши правки к текущей карточке.",
+        )
+        return
+
+    data = await state.get_data()
+    card_dict = data.get("card")
+    if not card_dict:
+        await message.answer("Данные потеряны, начни заново — /picture")
+        await state.clear()
+        return
+
+    try:
+        current = _card_from_dict(card_dict)
+    except Exception as e:
+        logger.error(f"got_picture_edits: failed to restore CardData: {e}", exc_info=True)
+        await message.answer("Данные испорчены, начни заново — /picture")
+        await state.clear()
+        return
+
+    await message.answer("Применяю правки...")
+
+    from src.card import revise_card_from_text, format_preview
+    try:
+        revised = await revise_card_from_text(current, text)
+    except Exception as e:
+        logger.error(f"revise_card_from_text failed: {e}", exc_info=True)
+        revised = None
+
+    if revised is None:
+        # Остаёмся в том же state, старая карточка нетронута, кнопки на
+        # последнем превью всё ещё живые — юзер может переформулировать
+        # или сгенерить существующее.
+        await message.answer(
+            "Не понял правку. Попробуй сформулировать точнее — какое поле "
+            "меняем и на что. Или /cancel чтобы выйти."
+        )
+        return
+
+    # Снимаем клавиатуру со СТАРОГО превью, чтобы юзер не жал на устаревшее.
+    old_preview_id = data.get("preview_message_id")
+    if old_preview_id:
+        await _clear_preview_keyboard(message.chat.id, old_preview_id)
+
+    # Показываем новое превью и запоминаем его message_id.
+    from dataclasses import asdict
+    preview_text = format_preview(revised)
+    sent = await message.answer(
+        "Обновил. Проверь:\n\n"
+        + preview_text
+        + "\n\nСгенерить карточку? Если ещё что-то не так — "
+        "отправь правки следующим сообщением.",
+        reply_markup=_picture_confirm_kb(),
+    )
+    await state.update_data(
+        card=asdict(revised),
+        preview_message_id=sent.message_id,
+    )
+
+
 @dp.message(PictureStates.waiting_confirm)
-async def picture_confirm_wrong_input(message: Message, state: FSMContext) -> None:
-    """Если пользователь пишет текст вместо клика по кнопке."""
+async def picture_confirm_non_text(message: Message, state: FSMContext) -> None:
+    """Если в waiting_confirm пришло что-то не текстовое (фото/документ)."""
     await message.answer(
-        "Нажми одну из кнопок под превью, или /cancel чтобы выйти.",
+        "Жду либо клик по кнопке под превью, либо текст с правками. "
+        "Или /cancel чтобы выйти.",
     )
 
 

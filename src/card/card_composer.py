@@ -517,6 +517,152 @@ def _fix_publications_plural(tag: str) -> str:
     return _pubs_word(n) + m.group(2)
 
 
+# --- Правки существующей карточки через ИИ --------------------------------
+
+REVISE_SYSTEM_PROMPT = """Ты — редактор карточки отчёта Кинопоиска. Пользователь
+показал тебе превью карточки (в виде JSON) и хочет что-то поправить свободным
+текстом. Твоя задача — применить правки и вернуть обновлённую структуру карточки.
+
+⚠️ ГЛАВНЫЕ ПРАВИЛА:
+1. Если какое-то поле НЕ упомянуто в правках — оставь его как было в текущей
+   структуре. Не переделывай то, что пользователь не просил менять.
+2. Числа применяй буквально. Если пользователь пишет «145к», «145 тыс», «145 000» —
+   всё это = 145 000. Форматирование чисел — через пробел каждые 3 разряда: «145 000».
+3. Если пользователь просит убрать канал (например, «убери ВК Клипы») — удали
+   соответствующий элемент из rows.
+4. Если пользователь просит добавить канал — добавь новый элемент в rows.
+   Если пользователь не указал охват для нового канала — поставь reach="0".
+5. highlight=true может быть только у ОДНОЙ строки одновременно.
+   Если пользователь явно выделяет другую строку — переключи highlight на неё,
+   у остальных сделай false.
+6. Плюрализация тэгов «X публикаций»: 1 → «1 публикация», 2/3/4 → «2 публикации»,
+   21 → «21 публикация», 5-20 → «X публикаций».
+7. Если пользователь прислал ПОЛНОСТЬЮ НОВЫЙ набор данных (новый проект,
+   всё новое) — верни новую структуру целиком, не пытайся мержить со старой.
+8. НЕ ПРИДУМЫВАЙ факты, которых нет ни в текущей структуре, ни в правках.
+
+⚠️ ЕСЛИ ПРАВКА НЕПОНЯТНА — верни JSON вида {"error": "коротко чего не понял"}.
+НЕ возвращай молча старую структуру: это будет выглядеть будто ты применил правку,
+хотя не применил.
+
+ФОРМАТ ОТВЕТА — строго валидный JSON без комментариев, одна из двух форм:
+
+Успех:
+{
+  "kicker": "...",
+  "title_lines": ["...", "..."],
+  "hero": "...",
+  "subtitle": "...",
+  "rows": [
+    {"name": "...", "tag": "...", "reach": "...", "highlight": true},
+    {"name": "...", "tag": "...", "reach": "...", "highlight": false}
+  ],
+  "footer": "..."
+}
+
+Ошибка (правка непонятна):
+{"error": "не понял, какую цифру ты хочешь заменить"}
+
+Не пиши ничего кроме JSON. Не оборачивай в ```json ...```."""
+
+
+async def revise_card_from_text(
+    current: CardData,
+    edits_text: str,
+    openai_client=None,
+    model: str = "gpt-4o-mini",
+) -> Optional[CardData]:
+    """
+    Принимает текущую карточку и свободный текст правок. Возвращает новую
+    CardData с применёнными изменениями или None, если модель:
+      - не смогла разобрать правку,
+      - вернула JSON вида {"error": "..."},
+      - ответила чем-то, что не парсится.
+
+    В случае None вызывающий код должен показать пользователю сообщение
+    «не понял правку», ОСТАВИВ текущую карточку в state.
+    """
+    edits_text = (edits_text or "").strip()
+    if not edits_text:
+        logger.info("revise_card_from_text: empty edits")
+        return None
+
+    if openai_client is None:
+        try:
+            from src.analyzer.openai_analyzer import client as _c
+            openai_client = _c
+        except Exception:
+            logger.warning("revise_card_from_text: no OpenAI client available")
+            return None
+
+    # Сериализуем текущую карточку в JSON — как модель её потом и вернёт.
+    from dataclasses import asdict
+    current_json = json.dumps(asdict(current), ensure_ascii=False)
+
+    user_message = (
+        f"ТЕКУЩАЯ СТРУКТУРА (JSON):\n{current_json}\n\n"
+        f"ПРАВКИ ОТ ПОЛЬЗОВАТЕЛЯ:\n{edits_text}"
+    )
+
+    try:
+        resp = await openai_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": REVISE_SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            temperature=0.2,
+            timeout=45,
+            response_format={"type": "json_object"},
+        )
+        content = resp.choices[0].message.content
+        parsed = json.loads(content)
+        logger.info(f"revise_card_from_text: got JSON ({len(content)} chars)")
+    except Exception as e:
+        logger.warning(f"revise_card_from_text failed: {e}")
+        return None
+
+    # Модель отдала {"error": "..."} — правка непонятна.
+    if isinstance(parsed, dict) and parsed.get("error"):
+        logger.info(f"revise_card_from_text: model returned error: {parsed['error']}")
+        return None
+
+    try:
+        rows_raw = parsed.get("rows") or []
+        rows: list[CardRow] = []
+        for r in rows_raw:
+            name = str(r.get("name", ""))
+            reach = str(r.get("reach", ""))
+            if not (name or reach):
+                continue
+
+            tag = r.get("tag") or None
+            if tag and isinstance(tag, str):
+                tag = _fix_publications_plural(tag)
+
+            rows.append(CardRow(
+                name=name,
+                tag=tag,
+                reach=reach,
+                highlight=bool(r.get("highlight", False)),
+            ))
+
+        return CardData(
+            kicker=str(parsed.get("kicker", "") or ""),
+            title_lines=[
+                s for s in (parsed.get("title_lines") or [])
+                if s
+            ][:2],
+            hero=str(parsed.get("hero", "") or ""),
+            subtitle=str(parsed.get("subtitle", "") or ""),
+            rows=rows,
+            footer=str(parsed.get("footer", "") or ""),
+        )
+    except Exception as e:
+        logger.warning(f"revise_card_from_text: bad JSON structure: {e}")
+        return None
+
+
 def build_picture_data_block(
     project_name: str,
     posts_data: list[dict],
