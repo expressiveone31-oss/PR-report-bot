@@ -1,0 +1,22 @@
+# Railway build config (nixpacks).
+# Нужно для генерации PNG-карточки (cairosvg → libcairo → шрифты).
+#
+# Явно ставим:
+#   - cairo:        нативная библиотека, которую подтягивает cairocffi
+#   - pango:        для рендера текста внутри cairo
+#   - gdk-pixbuf:   для растровых изображений (транзитивно от cairo)
+#   - libffi:       нужен cairocffi
+#   - fontconfig:   для поиска шрифтов
+#   - freetype:     растеризация шрифтов
+#   - dejavu_fonts: шрифт с полной поддержкой кириллицы (fallback для sans-serif)
+
+[phases.setup]
+nixPkgs = [
+    "cairo",
+    "pango",
+    "gdk-pixbuf",
+    "libffi",
+    "freetype",
+    "fontconfig",
+    "dejavu_fonts",
+]

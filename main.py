@@ -16,7 +16,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
 
 from src.config import TELEGRAM_BOT_TOKEN
-from src.orchestrator import process_links, process_mediaplan
+from src.orchestrator import process_links, process_mediaplan, process_mediaplan_full
 
 
 
@@ -122,6 +122,37 @@ def parse_number(text: str) -> float | None:
 def send_long(text: str, chunk_size: int = 4000) -> list[str]:
     """Разбивает длинный текст на части."""
     return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+
+
+async def _try_send_card(
+    message: Message,
+    project_name: str,
+    posts_data: list[dict],
+    total_reach: int,
+) -> None:
+    """
+    Пытается сгенерить и отправить брендовую карточку после текстового отчёта.
+    Никогда не падает — при любой ошибке просто логирует и пропускает.
+    """
+    try:
+        from src.card.card_composer import compose_card
+        from src.card.kinopoisk_card import render_card
+
+        total_posts = len(posts_data)
+        card_data = await compose_card(
+            project_name=project_name,
+            posts_data=posts_data,
+            total_reach=total_reach,
+            total_posts=total_posts,
+        )
+        png_bytes = render_card(card_data, scale=1.5)
+
+        from aiogram.types import BufferedInputFile
+        photo = BufferedInputFile(png_bytes, filename="card.png")
+        await message.answer_photo(photo)
+        logger.info(f"Card sent: {len(png_bytes)} bytes")
+    except Exception as e:
+        logger.warning(f"Failed to send report card: {e}", exc_info=True)
 
 
 @dp.message(Command("testcomments"))
@@ -451,7 +482,9 @@ async def got_csv_mediaplan(message: Message, state: FSMContext) -> None:
     await message.answer("Иду за данными через API — это займёт до минуты...", parse_mode=None)
 
     try:
-        result = await process_mediaplan(mp, project_name=project_name)
+        result, posts_data, total_actual = await process_mediaplan_full(
+            mp, project_name=project_name
+        )
     except Exception as e:
         logger.error(f"Processing error: {e}", exc_info=True)
         await message.answer("Ошибка при сборе данных. Попробуй ещё раз (/sumup).", parse_mode=None)
@@ -460,6 +493,9 @@ async def got_csv_mediaplan(message: Message, state: FSMContext) -> None:
     await state.clear()
     for chunk in send_long(result):
         await message.answer(chunk, parse_mode=None)
+
+    # Итоговая карточка — best-effort, не роняет отчёт
+    await _try_send_card(message, project_name, posts_data, total_actual)
 
 
 # ШАГ 0б — получили текст (ссылки) вместо CSV
@@ -684,6 +720,10 @@ async def got_project_name(message: Message, state: FSMContext) -> None:
     # Затем акценты — отправляем без Markdown чтобы избежать ошибок парсинга
     for chunk in send_long(result):
         await message.answer(chunk, parse_mode=None)
+
+    # Итоговая карточка — best-effort, не роняет отчёт
+    posts_data = getattr(breakdown, "posts_data", []) or []
+    await _try_send_card(message, project_name, posts_data, total_actual)
 
 
 # Если пишут текст вне диалога

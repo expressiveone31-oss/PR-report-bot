@@ -235,8 +235,22 @@ async def _fetch_stats_for_post(post: Post) -> dict:
 
 async def process_mediaplan(mp: MediaPlan, project_name: str = "") -> str:
     """
-    Принимает объект MediaPlan, параллельно собирает статистику
-    по всем постам и возвращает текст акцентов от OpenAI.
+    Тонкая обёртка: возвращает только текст отчёта (обратная совместимость).
+    Для карточки используй process_mediaplan_full().
+    """
+    result, _posts_data, _total_actual = await process_mediaplan_full(mp, project_name)
+    return result
+
+
+async def process_mediaplan_full(
+    mp: MediaPlan, project_name: str = ""
+) -> tuple[str, list[dict], int]:
+    """
+    Как process_mediaplan, но возвращает также данные постов и total_actual —
+    чтобы можно было построить итоговую карточку.
+
+    Returns:
+        (result_text, posts_data, total_actual_reach)
     """
     # Для органики берём только топ-20 по охвату — остальные раздувают промпт без пользы
     organic_sorted = sorted(
@@ -375,7 +389,7 @@ async def process_mediaplan(mp: MediaPlan, project_name: str = "") -> str:
         total_placement_budget=mp.total_budget,
     )
 
-    return result
+    return result, list(posts_data), mp_total
 
 
 async def process_links(
@@ -523,7 +537,20 @@ async def process_links(
         total_placement_budget=budget,  # в диалоговом режиме пользователь вводит бюджет размещений
     )
 
-    return result, total_actual, breakdown
+    # Возвращаем список breakdown в подтипе, который также содержит posts_data.
+    # Это позволяет старым вызовам работать (b['url'] и т.п.), а новым — брать .posts_data
+    result_breakdown = _BreakdownWithData(breakdown)
+    result_breakdown.posts_data = list(posts_data)
+    return result, total_actual, result_breakdown
+
+
+class _BreakdownWithData(list):
+    """list с дополнительным атрибутом posts_data — для передачи в карточку."""
+    posts_data: list[dict]
+
+    def __init__(self, items):
+        super().__init__(items)
+        self.posts_data = []
 
 
 def _detect_platform(url: str) -> str:
