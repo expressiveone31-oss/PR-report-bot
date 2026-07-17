@@ -310,12 +310,24 @@ async def update_wrong_file(message: Message, state: FSMContext) -> None:
 @dp.message(CommandStart())
 @dp.message(Command("help"))
 async def cmd_start(message: Message, state: FSMContext) -> None:
+    """Приветствие + меню. Никакого автозапуска — пользователь сам выбирает команду."""
     await state.clear()
     await message.answer(
         "Привет! Помогу подготовить аналитику по прошедшему проекту.\n\n"
-        "*Собрать отчёт* — /start или скинь CSV/Excel медиаплана\n"
+        "*Собрать отчёт* — /sumup\n"
         "*Обновить охваты в таблице* — /update\n\n"
         "Поддерживаю: VK, Telegram, Instagram, YouTube, TikTok, Twitter/X"
+    )
+
+
+@dp.message(Command("sumup"))
+async def cmd_sumup(message: Message, state: FSMContext) -> None:
+    """Запуск сбора отчёта — принимает CSV/Excel медиаплана или список ссылок."""
+    await state.clear()
+    await message.answer(
+        "Ок, собираем отчёт.\n\n"
+        "Скинь *CSV или Excel медиаплан*, либо напиши ссылки на посты вручную.",
+        parse_mode="Markdown",
     )
     await state.set_state(ReportStates.waiting_csv_or_links)
 
@@ -392,7 +404,7 @@ async def got_csv_mediaplan(message: Message, state: FSMContext) -> None:
             result = await analyze_target_campaign(target_mp)
         except Exception as e:
             logger.error(f"Target analysis error: {e}", exc_info=True)
-            await message.answer("Ошибка при анализе. Попробуй ещё раз (/start).", parse_mode=None)
+            await message.answer("Ошибка при анализе. Попробуй ещё раз (/sumup).", parse_mode=None)
             return
 
         await state.clear()
@@ -407,14 +419,14 @@ async def got_csv_mediaplan(message: Message, state: FSMContext) -> None:
     except Exception as e:
         logger.error(f"MP parse error: {e}", exc_info=True)
         await message.answer(
-            f"Не удалось разобрать МП: {e}\n\nПопробуй скинуть ссылки вручную — напиши /start",
+            f"Не удалось разобрать МП: {e}\n\nПопробуй скинуть ссылки вручную — напиши /sumup",
             parse_mode=None,
         )
         return
 
     if not mp.paid_posts:
         await message.answer(
-            "Не нашёл paid-постов в МП. Проверь файл или скинь ссылки вручную (/start).",
+            "Не нашёл paid-постов в МП. Проверь файл или скинь ссылки вручную (/sumup).",
             parse_mode=None,
         )
         return
@@ -442,7 +454,7 @@ async def got_csv_mediaplan(message: Message, state: FSMContext) -> None:
         result = await process_mediaplan(mp, project_name=project_name)
     except Exception as e:
         logger.error(f"Processing error: {e}", exc_info=True)
-        await message.answer("Ошибка при сборе данных. Попробуй ещё раз (/start).", parse_mode=None)
+        await message.answer("Ошибка при сборе данных. Попробуй ещё раз (/sumup).", parse_mode=None)
         return
 
     await state.clear()
@@ -473,7 +485,7 @@ async def got_links_instead_of_csv(message: Message, state: FSMContext) -> None:
 @dp.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await message.answer("Сброшено. Напиши /start чтобы начать заново.")
+    await message.answer("Сброшено. Напиши /sumup чтобы начать сбор отчёта заново.")
 
 
 # ШАГ 1 — Paid ссылки
@@ -644,7 +656,7 @@ async def got_project_name(message: Message, state: FSMContext) -> None:
     except Exception as e:
         logger.error(f"Processing error: {e}", exc_info=True)
         await message.answer(
-            "Произошла ошибка при сборе данных. Попробуй ещё раз (/start) или проверь ссылки."
+            "Произошла ошибка при сборе данных. Попробуй ещё раз (/sumup) или проверь ссылки."
         )
         return
 
@@ -680,12 +692,26 @@ async def handle_other(message: Message, state: FSMContext) -> None:
     current = await state.get_state()
     if current is None:
         await message.answer(
-            "Напиши /start чтобы начать аналитику по прошедшему проекту."
+            "Напиши /sumup чтобы начать аналитику по прошедшему проекту."
         )
+
+
+async def _set_bot_commands() -> None:
+    """Регистрирует меню команд в Telegram (иконка «/» рядом с полем ввода)."""
+    from aiogram.types import BotCommand
+    await bot.set_my_commands([
+        BotCommand(command="sumup",  description="Собрать отчёт по прошедшему проекту"),
+        BotCommand(command="update", description="Обновить фактические охваты в МП"),
+        BotCommand(command="help",   description="Помощь / список команд"),
+    ])
 
 
 async def main() -> None:
     logger.info("Bot starting...")
+    try:
+        await _set_bot_commands()
+    except Exception as e:
+        logger.warning(f"Failed to set bot commands menu: {e}")
     await dp.start_polling(bot)
 
 
