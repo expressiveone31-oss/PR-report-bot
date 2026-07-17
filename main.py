@@ -8,7 +8,13 @@ import logging
 import re
 import os
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    BufferedInputFile,
+)
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -16,7 +22,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
 
 from src.config import TELEGRAM_BOT_TOKEN
-from src.orchestrator import process_links, process_mediaplan, process_mediaplan_full
+from src.orchestrator import process_links, process_mediaplan
 
 
 
@@ -45,6 +51,12 @@ class ReportStates(StatesGroup):
 
 class UpdateStates(StatesGroup):
     waiting_xlsx = State()   # ждём xlsx для обновления охватов
+
+
+class PictureStates(StatesGroup):
+    """FSM для команды /picture — генерация карточки из свободного текста."""
+    waiting_text    = State()   # шаг 1: ждём текст с данными
+    waiting_confirm = State()   # шаг 2: показали превью, ждём подтверждения
 
 
 def _detect_mp_type(content: str) -> str:
@@ -124,35 +136,7 @@ def send_long(text: str, chunk_size: int = 4000) -> list[str]:
     return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
 
 
-async def _try_send_card(
-    message: Message,
-    project_name: str,
-    posts_data: list[dict],
-    total_reach: int,
-) -> None:
-    """
-    Пытается сгенерить и отправить брендовую карточку после текстового отчёта.
-    Никогда не падает — при любой ошибке просто логирует и пропускает.
-    """
-    try:
-        from src.card.card_composer import compose_card
-        from src.card.kinopoisk_card import render_card
 
-        total_posts = len(posts_data)
-        card_data = await compose_card(
-            project_name=project_name,
-            posts_data=posts_data,
-            total_reach=total_reach,
-            total_posts=total_posts,
-        )
-        png_bytes = render_card(card_data, scale=1.5)
-
-        from aiogram.types import BufferedInputFile
-        photo = BufferedInputFile(png_bytes, filename="card.png")
-        await message.answer_photo(photo)
-        logger.info(f"Card sent: {len(png_bytes)} bytes")
-    except Exception as e:
-        logger.warning(f"Failed to send report card: {e}", exc_info=True)
 
 
 @dp.message(Command("testcomments"))
@@ -346,7 +330,8 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     await message.answer(
         "Привет! Помогу подготовить аналитику по прошедшему проекту.\n\n"
         "*Собрать отчёт* — /sumup\n"
-        "*Обновить охваты в таблице* — /update\n\n"
+        "*Обновить охваты в таблице* — /update\n"
+        "*Собрать карточку из текста* — /picture\n\n"
         "Поддерживаю: VK, Telegram, Instagram, YouTube, TikTok, Twitter/X"
     )
 
@@ -482,9 +467,7 @@ async def got_csv_mediaplan(message: Message, state: FSMContext) -> None:
     await message.answer("Иду за данными через API — это займёт до минуты...", parse_mode=None)
 
     try:
-        result, posts_data, total_actual = await process_mediaplan_full(
-            mp, project_name=project_name
-        )
+        result = await process_mediaplan(mp, project_name=project_name)
     except Exception as e:
         logger.error(f"Processing error: {e}", exc_info=True)
         await message.answer("Ошибка при сборе данных. Попробуй ещё раз (/sumup).", parse_mode=None)
@@ -493,9 +476,6 @@ async def got_csv_mediaplan(message: Message, state: FSMContext) -> None:
     await state.clear()
     for chunk in send_long(result):
         await message.answer(chunk, parse_mode=None)
-
-    # Итоговая карточка — best-effort, не роняет отчёт
-    await _try_send_card(message, project_name, posts_data, total_actual)
 
 
 # ШАГ 0б — получили текст (ссылки) вместо CSV
@@ -522,6 +502,167 @@ async def got_links_instead_of_csv(message: Message, state: FSMContext) -> None:
 async def cmd_cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer("Сброшено. Напиши /sumup чтобы начать сбор отчёта заново.")
+
+
+# ============================================================================
+# КАРТОЧКА — /picture
+# ============================================================================
+
+def _picture_confirm_kb() -> InlineKeyboardMarkup:
+    """Inline-клавиатура для превью карточки: подтвердить / отменить."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Сгенерить", callback_data="picture:confirm"),
+            InlineKeyboardButton(text="✖️ Отмена", callback_data="picture:cancel"),
+        ],
+    ])
+
+
+@dp.message(Command("picture"))
+async def cmd_picture(message: Message, state: FSMContext) -> None:
+    """Запуск режима генерации брендовой карточки из свободного текста."""
+    await state.clear()
+    await message.answer(
+        "Ок, соберём карточку.\n\n"
+        "Скинь текст с данными: цифры, названия каналов/площадок, "
+        "заголовок проекта. Формат — любой. Можно кусок отчёта, "
+        "таблицу, буллиты — разберусь.\n\n"
+        "Пример:\n"
+        "Аниме на Кинопоиске — 142 327 просмотров, 57 публикаций.\n"
+        "ВКонтакте «Твои мужики» — 14 постов, 72 115.\n"
+        "X (Twitter) — 21 пост, 42 439.\n"
+        "Telegram — 19 постов, 19 075.\n\n"
+        "Отменить — /cancel",
+    )
+    await state.set_state(PictureStates.waiting_text)
+
+
+@dp.message(PictureStates.waiting_text, F.text)
+async def got_picture_text(message: Message, state: FSMContext) -> None:
+    """
+    Получили текст. Прогоняем через ИИ, показываем превью с кнопками
+    подтвердить / отменить.
+    """
+    text = (message.text or "").strip()
+    if not text or text.startswith("/"):
+        # если пришла команда — не считаем это данными
+        await message.answer("Скинь текст с данными для карточки, или /cancel чтобы выйти.")
+        return
+
+    await message.answer("Разбираю текст, готовлю превью...")
+
+    from src.card import compose_card_from_text, format_preview
+    try:
+        card = await compose_card_from_text(text)
+    except Exception as e:
+        logger.error(f"compose_card_from_text failed: {e}", exc_info=True)
+        card = None
+
+    if card is None:
+        await message.answer(
+            "Не удалось разобрать текст. Попробуй сформулировать иначе — "
+            "укажи хотя бы общее число, заголовок и разбивку по каналам."
+        )
+        return
+
+    preview = format_preview(card)
+
+    # Сохраняем разобранный card в state и просим подтверждение
+    # CardData — dataclass, сериализуем в dict для FSM хранилища
+    from dataclasses import asdict
+    await state.update_data(card=asdict(card))
+    await state.set_state(PictureStates.waiting_confirm)
+
+    await message.answer(
+        "Вот что понял:\n\n" + preview + "\n\nСгенерить карточку?",
+        reply_markup=_picture_confirm_kb(),
+    )
+
+
+@dp.callback_query(PictureStates.waiting_confirm, F.data == "picture:cancel")
+async def picture_cancel(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if cb.message:
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await cb.message.answer("Отменено. Напиши /picture чтобы начать заново.")
+    await cb.answer()
+
+
+@dp.callback_query(PictureStates.waiting_confirm, F.data == "picture:confirm")
+async def picture_confirm(cb: CallbackQuery, state: FSMContext) -> None:
+    """Пользователь подтвердил превью — рендерим и отправляем карточку."""
+    data = await state.get_data()
+    card_dict = data.get("card")
+    if not card_dict:
+        await cb.answer("Данные потеряны, попробуй /picture заново", show_alert=True)
+        await state.clear()
+        return
+
+    # Ретайпим CardData
+    from src.card import CardData, CardRow, render_card
+    try:
+        rows = [CardRow(**r) for r in (card_dict.get("rows") or [])]
+        card = CardData(
+            kicker=card_dict.get("kicker", ""),
+            title_lines=list(card_dict.get("title_lines") or []),
+            hero=card_dict.get("hero", ""),
+            subtitle=card_dict.get("subtitle", ""),
+            rows=rows,
+            footer=card_dict.get("footer", ""),
+            breakdown_label=card_dict.get("breakdown_label") or "РАЗБИВКА ПО ПЛОЩАДКАМ",
+            reach_label=card_dict.get("reach_label") or "ОХВАТ",
+        )
+    except Exception as e:
+        logger.error(f"picture_confirm: failed to restore CardData: {e}", exc_info=True)
+        await cb.answer("Данные испорчены, попробуй /picture заново", show_alert=True)
+        await state.clear()
+        return
+
+    if cb.message:
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await cb.message.answer("Рендерю карточку...")
+
+    try:
+        png_bytes = render_card(card, scale=1.5)
+    except Exception as e:
+        logger.error(f"picture_confirm: render_card failed: {e}", exc_info=True)
+        if cb.message:
+            await cb.message.answer(
+                f"Не удалось нарисовать карточку: {type(e).__name__}. "
+                "Возможно на сервере не хватает библиотеки cairo — напиши админу."
+            )
+        await state.clear()
+        await cb.answer()
+        return
+
+    if cb.message:
+        photo = BufferedInputFile(png_bytes, filename="card.png")
+        await cb.message.answer_photo(photo)
+
+    await state.clear()
+    await cb.answer("Готово")
+
+
+@dp.message(PictureStates.waiting_confirm)
+async def picture_confirm_wrong_input(message: Message, state: FSMContext) -> None:
+    """Если пользователь пишет текст вместо клика по кнопке."""
+    await message.answer(
+        "Нажми одну из кнопок под превью, или /cancel чтобы выйти.",
+    )
+
+
+@dp.message(PictureStates.waiting_text)
+async def picture_text_wrong_input(message: Message, state: FSMContext) -> None:
+    """Если пришло что-то не текстовое (документ, фото и т.п.)."""
+    await message.answer(
+        "Жду текст с данными для карточки. Или напиши /cancel.",
+    )
 
 
 # ШАГ 1 — Paid ссылки
@@ -721,10 +862,6 @@ async def got_project_name(message: Message, state: FSMContext) -> None:
     for chunk in send_long(result):
         await message.answer(chunk, parse_mode=None)
 
-    # Итоговая карточка — best-effort, не роняет отчёт
-    posts_data = getattr(breakdown, "posts_data", []) or []
-    await _try_send_card(message, project_name, posts_data, total_actual)
-
 
 # Если пишут текст вне диалога
 @dp.message()
@@ -740,9 +877,10 @@ async def _set_bot_commands() -> None:
     """Регистрирует меню команд в Telegram (иконка «/» рядом с полем ввода)."""
     from aiogram.types import BotCommand
     await bot.set_my_commands([
-        BotCommand(command="sumup",  description="Собрать отчёт по прошедшему проекту"),
-        BotCommand(command="update", description="Обновить фактические охваты в МП"),
-        BotCommand(command="help",   description="Помощь / список команд"),
+        BotCommand(command="sumup",   description="Собрать отчёт по прошедшему проекту"),
+        BotCommand(command="update",  description="Обновить фактические охваты в МП"),
+        BotCommand(command="picture", description="Собрать брендовую карточку из текста"),
+        BotCommand(command="help",    description="Помощь / список команд"),
     ])
 
 

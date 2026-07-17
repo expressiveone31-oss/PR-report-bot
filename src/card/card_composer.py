@@ -365,3 +365,182 @@ async def compose_card(
         logger.warning(f"compose_card: AI path failed, falling back: {e}")
 
     return deterministic_compose(project_name, posts_data, total_reach, total_posts)
+
+
+# --- Свободный текст → CardData через ИИ -----------------------------------
+
+FREETEXT_SYSTEM_PROMPT = """Ты — редактор карточки для брендового отчёта Кинопоиска.
+Пользователь присылает СВОБОДНЫЙ ТЕКСТ: может быть кусок отчёта, таблица,
+разрозненные факты, ссылки, комментарии. Твоя задача — извлечь из этого
+структуру карточки и вернуть JSON.
+
+⚠️ САМОЕ ВАЖНОЕ: НЕ ПРИДУМЫВАЙ ФАКТЫ.
+- НЕ добавляй числа, которых нет в тексте.
+- НЕ выдумывай названия каналов/сообществ.
+- Если в тексте нет каких-то данных — оставляй поле пустым или значение null.
+- Если пользователь дал очень мало данных — верни карточку с тем что есть.
+
+ЧТО ИЩЕМ В ТЕКСТЕ:
+1. Название проекта / тему → в kicker (капсом).
+2. Общее число (охват / просмотры / показы / вовлечение) — самое большое
+   значимое число проекта → в hero.
+3. Заголовок 1-2 строки — короткая формулировка того что произошло:
+   «Волна мемов в фанатских сообществах», «Итоги посева», «Первая неделя проката».
+4. Подзаголовок — что за число в hero: «просмотров», «показов», «вовлечений».
+   Плюс общее число публикаций если есть: «просмотров · 57 публикаций».
+5. Разбивка по каналам/площадкам — искать пары «название → число».
+   Часто идут списком, таблицей, «в ВК получили X просмотров», «Telegram — Y»,
+   «канал А: N постов, M охват» и т.п. Одна пара = одна строка (row).
+   name — как в тексте (не переводи, не сокращай, не добавляй кавычки если их нет).
+   tag — если есть число публикаций/постов → «14 публикаций», «21 публикация»
+          с правильным падежом; иначе null.
+   reach — число справа, форматируй с пробелами: «72 115».
+   highlight — TRUE для самой сильной строки (максимальный reach) или для той,
+               которую пользователь явно выделил в тексте ключевыми словами
+               («главная», «ключевая», «топ», «выиграла», выделено жирным).
+6. Footer — короткая техническая строка. Пример: «Отчёт по проекту · охват
+   фактический на момент выгрузки».
+
+ПРАВИЛА ФОРМАТА:
+- Числа в reach и hero — с пробелами через каждые 3 цифры: «142 327», «1 200 000».
+- title_lines: 1 или 2 элемента строкой, каждая до ~30 символов.
+- kicker: капсом, до ~30 символов.
+- rows: до 5 штук. Если в тексте больше — оставь топ-5 по reach, остальное игнорируй.
+- Если что-то не понял или данных нет — не выдумывай, поставь null или "".
+
+ФОРМАТ ОТВЕТА — строго валидный JSON:
+{
+  "kicker": "АНИМЕ НА КИНОПОИСКЕ",
+  "title_lines": ["Волна мемов", "в фанатских сообществах"],
+  "hero": "142 327",
+  "subtitle": "просмотров · 57 публикаций",
+  "rows": [
+    {"name": "ВКонтакте — «Твои мужики»", "tag": "14 публикаций", "reach": "72 115", "highlight": true},
+    {"name": "X (Twitter)", "tag": "21 публикация", "reach": "42 439", "highlight": false}
+  ],
+  "footer": "Отчёт по проекту · охват фактический на момент выгрузки"
+}
+
+Не пиши ничего кроме JSON. Не оборачивай в ```json ...```. Только сырой JSON."""
+
+
+async def compose_card_from_text(
+    text: str,
+    openai_client=None,
+    model: str = "gpt-4o-mini",
+) -> Optional[CardData]:
+    """
+    Разбирает свободный текст пользователя и превращает в CardData через OpenAI.
+    Возвращает None, если OpenAI недоступен или вернул мусор.
+
+    Логи детальны — можно понять что пошло не так, если карточка получилась странной.
+    """
+    text = (text or "").strip()
+    if not text:
+        logger.info("compose_card_from_text: empty input")
+        return None
+
+    if openai_client is None:
+        try:
+            from src.analyzer.openai_analyzer import client as _c
+            openai_client = _c
+        except Exception:
+            logger.warning("compose_card_from_text: no OpenAI client available")
+            return None
+
+    try:
+        resp = await openai_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": FREETEXT_SYSTEM_PROMPT},
+                {"role": "user", "content": text},
+            ],
+            temperature=0.3,
+            timeout=45,
+            response_format={"type": "json_object"},
+        )
+        content = resp.choices[0].message.content
+        parsed = json.loads(content)
+        logger.info(f"compose_card_from_text: got JSON ({len(content)} chars)")
+    except Exception as e:
+        logger.warning(f"compose_card_from_text failed: {e}")
+        return None
+
+    try:
+        rows_raw = parsed.get("rows") or []
+        rows: list[CardRow] = []
+        for r in rows_raw:
+            name = str(r.get("name", ""))
+            reach = str(r.get("reach", ""))
+            if not (name or reach):
+                continue
+
+            # Плюрализация «публикация/публикации/публикаций» — не доверяем модели,
+            # исправляем самостоятельно, если тэг похож на "X публик..."
+            tag = r.get("tag") or None
+            if tag and isinstance(tag, str):
+                tag = _fix_publications_plural(tag)
+
+            rows.append(CardRow(
+                name=name,
+                tag=tag,
+                reach=reach,
+                highlight=bool(r.get("highlight", False)),
+            ))
+
+        return CardData(
+            kicker=str(parsed.get("kicker", "") or ""),
+            title_lines=[
+                s for s in (parsed.get("title_lines") or [])
+                if s
+            ][:2],
+            hero=str(parsed.get("hero", "") or ""),
+            subtitle=str(parsed.get("subtitle", "") or ""),
+            rows=rows,
+            footer=str(parsed.get("footer", "") or ""),
+        )
+    except Exception as e:
+        logger.warning(f"compose_card_from_text: bad JSON structure: {e}")
+        return None
+
+
+def _fix_publications_plural(tag: str) -> str:
+    """
+    Если tag имеет вид «N публик...», приводит к правильному падежу.
+    Иначе возвращает как есть.
+    """
+    import re
+    m = re.match(r"^\s*(\d+)\s+публик[а-яё]*\b(.*)$", tag, flags=re.IGNORECASE)
+    if not m:
+        return tag
+    n = int(m.group(1))
+    return _pubs_word(n) + m.group(2)
+
+
+def format_preview(card: CardData) -> str:
+    """
+    Отдаёт человекочитаемое превью содержимого карточки — чтобы показать
+    пользователю ДО рендера. Формат — обычный текст (без Markdown), безопасный
+    для отправки в Telegram.
+    """
+    lines: list[str] = []
+    if card.kicker:
+        lines.append(f"Плашка: {card.kicker}")
+    if card.title_lines:
+        lines.append(f"Заголовок: {' / '.join(card.title_lines)}")
+    if card.hero:
+        subtitle = f" ({card.subtitle})" if card.subtitle else ""
+        lines.append(f"Главное число: {card.hero}{subtitle}")
+    if card.rows:
+        lines.append("")
+        lines.append("Разбивка:")
+        for i, r in enumerate(card.rows, 1):
+            star = " ★" if r.highlight else ""
+            tag_str = f" ({r.tag})" if r.tag else ""
+            lines.append(f"  {i}. {r.name}{tag_str} — {r.reach}{star}")
+    if card.footer:
+        lines.append("")
+        lines.append(f"Подпись снизу: {card.footer}")
+    if not lines:
+        return "Не удалось выделить структуру из текста."
+    return "\n".join(lines)
