@@ -22,7 +22,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
 
 from src.config import TELEGRAM_BOT_TOKEN
-from src.orchestrator import process_links, process_mediaplan
+from src.orchestrator import process_links, process_mediaplan, process_mediaplan_full
 
 
 
@@ -467,7 +467,9 @@ async def got_csv_mediaplan(message: Message, state: FSMContext) -> None:
     await message.answer("Иду за данными через API — это займёт до минуты...", parse_mode=None)
 
     try:
-        result = await process_mediaplan(mp, project_name=project_name)
+        result, posts_data, total_actual = await process_mediaplan_full(
+            mp, project_name=project_name
+        )
     except Exception as e:
         logger.error(f"Processing error: {e}", exc_info=True)
         await message.answer("Ошибка при сборе данных. Попробуй ещё раз (/sumup).", parse_mode=None)
@@ -476,6 +478,15 @@ async def got_csv_mediaplan(message: Message, state: FSMContext) -> None:
     await state.clear()
     for chunk in send_long(result):
         await message.answer(chunk, parse_mode=None)
+
+    # Дополнительный блок: готовые данные для команды /picture
+    try:
+        from src.card import build_picture_data_block
+        block = build_picture_data_block(project_name, posts_data, total_actual)
+        await message.answer(block, parse_mode=None)
+    except Exception as e:
+        # Блок для карточки — не критичная фича, отчёт уже отправлен
+        logger.warning(f"Failed to build picture data block: {e}", exc_info=True)
 
 
 # ШАГ 0б — получили текст (ссылки) вместо CSV
@@ -631,11 +642,18 @@ async def picture_confirm(cb: CallbackQuery, state: FSMContext) -> None:
     try:
         png_bytes = render_card(card, scale=1.5)
     except Exception as e:
-        logger.error(f"picture_confirm: render_card failed: {e}", exc_info=True)
+        err_class = type(e).__name__
+        err_msg = str(e)
+        logger.error(f"picture_confirm: render_card failed: {err_class}: {err_msg}", exc_info=True)
         if cb.message:
+            # Пишем краткое сообщение + первую строку ошибки для быстрой диагностики
+            short_msg = err_msg.split("\n")[0][:200]
             await cb.message.answer(
-                f"Не удалось нарисовать карточку: {type(e).__name__}. "
-                "Возможно на сервере не хватает библиотеки cairo — напиши админу."
+                f"Не удалось нарисовать карточку.\n"
+                f"Тип: {err_class}\n"
+                f"Причина: {short_msg}\n\n"
+                f"Скорее всего на сервере не установлены системные библиотеки "
+                f"(cairo/pango/шрифты). Напиши админу — я передам детали в логи."
             )
         await state.clear()
         await cb.answer()
@@ -861,6 +879,17 @@ async def got_project_name(message: Message, state: FSMContext) -> None:
     # Затем акценты — отправляем без Markdown чтобы избежать ошибок парсинга
     for chunk in send_long(result):
         await message.answer(chunk, parse_mode=None)
+
+    # Дополнительный блок: готовые данные для команды /picture.
+    # posts_data лежат в _BreakdownWithData как атрибут.
+    try:
+        posts_data = getattr(breakdown, "posts_data", []) or []
+        if posts_data:
+            from src.card import build_picture_data_block
+            block = build_picture_data_block(project_name, posts_data, total_actual)
+            await message.answer(block, parse_mode=None)
+    except Exception as e:
+        logger.warning(f"Failed to build picture data block: {e}", exc_info=True)
 
 
 # Если пишут текст вне диалога

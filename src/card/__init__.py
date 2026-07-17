@@ -8,6 +8,7 @@ from src.card.kinopoisk_card import (
 from src.card.card_composer import (
     compose_card_from_text,
     format_preview,
+    build_picture_data_block,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "CardRow",
     "compose_card_from_text",
     "format_preview",
+    "build_picture_data_block",
 ]

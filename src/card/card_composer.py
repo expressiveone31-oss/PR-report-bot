@@ -517,6 +517,42 @@ def _fix_publications_plural(tag: str) -> str:
     return _pubs_word(n) + m.group(2)
 
 
+def build_picture_data_block(
+    project_name: str,
+    posts_data: list[dict],
+    total_reach: int,
+) -> str:
+    """
+    Формирует компактный текстовый блок с данными для команды /picture.
+    Пользователь копирует этот блок и отправляет в /picture — получает карточку.
+
+    Формат специально нейтрально-читабельный: одинаково удобен и человеку,
+    и ИИ-парсеру внутри compose_card_from_text.
+    """
+    lines: list[str] = []
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("Данные для карточки (/picture)")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    if project_name:
+        lines.append(f"Проект: {project_name}")
+
+    total_posts = len([p for p in posts_data if p])
+    lines.append(f"Итог: {_format_number(total_reach)} просмотров · {_pubs_word(total_posts)}")
+    lines.append("")
+
+    agg = _aggregate_by_channel(posts_data)
+    if agg:
+        lines.append("По каналам:")
+        for row in agg:
+            lines.append(
+                f"• {row['name']} — {_pubs_word(row['count'])}, {_format_number(row['reach'])}"
+            )
+
+    lines.append("")
+    lines.append("Скопируй сообщение → отправь в /picture → получишь карточку.")
+    return "\n".join(lines)
+
+
 def format_preview(card: CardData) -> str:
     """
     Отдаёт человекочитаемое превью содержимого карточки — чтобы показать
