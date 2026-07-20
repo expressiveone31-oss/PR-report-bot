@@ -110,14 +110,35 @@ def parse_with_schema(content: str, schema: CsvSchema) -> MediaPlan:
                         break
 
                 platform = _detect_platform(cell)
+                # Если шаблон содержит название и/или дату рядом со ссылкой,
+                # сохраняем их. Иначе API позже подставит название канала.
+                before = [str(v).strip() for v in row[:col_idx] if str(v).strip()]
+                organic_name = next(
+                    (
+                        value for value in reversed(before)
+                        if not value.startswith("http")
+                        and "ссылка" not in value.lower()
+                        and "органик" not in value.lower()
+                        and not re.fullmatch(r"\d{1,2}[./-]\d{1,2}[./-]\d{2,4}", value)
+                    ),
+                    cell,
+                )
+                organic_date = next(
+                    (
+                        value for value in row
+                        if re.fullmatch(r"\d{1,2}[./-]\d{1,2}[./-]\d{2,4}", str(value).strip())
+                    ),
+                    "",
+                )
                 mp.organic_posts.append(Post(
-                    name=cell,
+                    name=organic_name,
                     channel_url=cell,
                     platform=platform,
                     post_url=cell,
                     planned_reach=0,
                     actual_reach=reach if reach else None,
                     is_organic=True,
+                    date=organic_date,
                 ))
             continue
 

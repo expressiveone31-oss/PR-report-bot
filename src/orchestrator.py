@@ -12,7 +12,7 @@ from src.config import TWITTER_PROVIDER
 
 # Единый вход в Twitter API — переключается через TWITTER_PROVIDER
 _twitter_module = twitter241 if TWITTER_PROVIDER == "twitter241" else twitter
-from src.analyzer.openai_analyzer import analyze_campaign
+from src.analyzer.report_v2 import build_report_v2
 
 # Pyrogram доступен только если есть локальный файл сессии.
 # На Railway используем telegram92 API — SESSION_STRING там не надёжен.
@@ -223,10 +223,13 @@ async def _fetch_stats_for_post(post: Post) -> dict:
 
     return {
         "name": post.name,
+        "channel_url": post.channel_url,
         "platform": post.platform,
         "is_organic": post.is_organic,
         "post_url": post.post_url,
+        "date": post.date,
         "planned_reach": post.planned_reach,
+        "mp_actual_reach": post.actual_reach,
         "actual_cpv": post.actual_cpv,
         "planned_cpv": post.planned_cpv,
         "stats": stats,
@@ -252,14 +255,10 @@ async def process_mediaplan_full(
     Returns:
         (result_text, posts_data, total_actual_reach)
     """
-    # Для органики берём только топ-20 по охвату — остальные раздувают промпт без пользы
-    organic_sorted = sorted(
-        [p for p in mp.organic_posts if p.actual_reach],
-        key=lambda p: p.actual_reach or 0,
-        reverse=True
-    )[:20]
-
-    all_posts = mp.paid_posts + organic_sorted
+    # Для отчёта v2 проверяем через API всю органику со ссылками.
+    # Ограничения применяются только к дорогому сбору текстов комментариев,
+    # но не к охвату и построчной таблице.
+    all_posts = mp.paid_posts + mp.organic_posts
 
     # Разделяем посты по платформам
     # VK требует rate limiting (не более 3 запросов/сек) — обрабатываем последовательно с задержкой
@@ -296,6 +295,15 @@ async def process_mediaplan_full(
         # Разделяем посты по платформам
         telegram_posts = [pd for pd in posts_needing_comments if pd.get("platform") == "telegram"]
         instagram_posts = [pd for pd in posts_needing_comments if pd.get("platform") == "instagram"]
+
+        # На Railway telegram92 разрешает 1 запрос в минуту. Для отчёта берём
+        # только самый обсуждаемый Telegram-пост, иначе 10 постов = 9 минут ожидания.
+        if not PYROGRAM_AVAILABLE and len(telegram_posts) > 1:
+            telegram_posts.sort(
+                key=lambda pd: (pd.get("stats") or {}).get("comments") or 0,
+                reverse=True,
+            )
+            telegram_posts = telegram_posts[:1]
         
         logger.info(f"[COMMENTS DEBUG] Telegram posts: {len(telegram_posts)}, Instagram posts: {len(instagram_posts)}")
         
@@ -351,45 +359,15 @@ async def process_mediaplan_full(
                 else:
                     logger.warning(f"[COMMENTS DEBUG] Instagram no comments for {url}")
 
-    # Считаем охват
-    # Для экономии используем данные из МП (не из API) — они зафиксированы командой
-    total_actual_from_mp = mp.total_actual_reach  # берём итоговый охват из строки МП
-    total_organic_reach = sum(p.actual_reach or 0 for p in mp.organic_posts)
-
-    # Для передачи в промпт — для органики всегда берём цифры из МП, не из API
-    # Это предотвращает ситуацию когда GPT суммирует API-просмотры органики вместо МП-значений
-    total_actual = 0
-    for i, post_dict in enumerate(posts_data):
-        post = all_posts[i]
-        if post.is_organic:
-            actual_views = post.actual_reach or 0
-            # Подменяем API-просмотры на МП-значения для органики
-            post_dict["stats"]["views"] = actual_views
-        else:
-            views = post_dict["stats"].get("views")
-            actual_views = views if views else (post.actual_reach or 0)
-        if actual_views:
-            total_actual += actual_views
-
-    # Экономия считается по данным МП, не API
-    # Формула: (итоговый охват из МП - плановый охват) ÷ 2 руб.
-    MARKET_CPV = 2.0
-    mp_total = total_actual_from_mp if total_actual_from_mp else total_actual
-    overreach = mp_total - mp.total_planned_reach
-    total_savings = max(overreach / MARKET_CPV, 0)
-
-    result = await analyze_campaign(
+    result, metrics = await build_report_v2(
         project_name=project_name or "Без названия",
         posts_data=list(posts_data),
-        total_planned_reach=mp.total_planned_reach,
-        total_actual_reach=mp_total,       # итог из МП — зафиксированные цифры команды
-        total_budget=mp.total_budget,
-        total_savings=total_savings,
-        total_organic_reach=total_organic_reach,
-        total_placement_budget=mp.total_budget,
+        planned_reach=mp.total_planned_reach,
+        placement_budget=mp.total_budget,
+        control_total=mp.mp_total_actual_reach,
     )
 
-    return result, list(posts_data), mp_total
+    return result, list(posts_data), metrics.total_actual
 
 
 async def process_links(
@@ -400,7 +378,7 @@ async def process_links(
     budget: float,
     project_name: str = "",
     plan_by_url: dict | None = None,
-) -> tuple[str, int]:
+) -> tuple[str, int, list[dict]]:
     """
     Новый диалоговый режим — принимает ссылки напрямую без МП.
     Возвращает (текст акцентов, суммарный фактический охват).
@@ -440,6 +418,20 @@ async def process_links(
             is_organic=True,
         ))
 
+    # Если органика задана только суммой, всё равно создаём строку отчёта.
+    # У неё нет ссылки, поэтому API не вызывается, а факт берётся из введённой
+    # суммы как fallback «МП/ручной ввод».
+    if organic_reach_manual and not organic_posts:
+        organic_posts.append(Post(
+            name="Органика (введена вручную)",
+            channel_url="",
+            platform="unknown",
+            post_url="",
+            planned_reach=0,
+            actual_reach=int(organic_reach_manual),
+            is_organic=True,
+        ))
+
     all_posts = paid_posts + organic_posts
 
     # VK — последовательно, остальные параллельно
@@ -469,6 +461,13 @@ async def process_links(
         # Разделяем по платформам
         telegram_posts = [pd for pd in posts_needing_comments if pd.get("platform") == "telegram"]
         instagram_posts = [pd for pd in posts_needing_comments if pd.get("platform") == "instagram"]
+
+        if not PYROGRAM_AVAILABLE and len(telegram_posts) > 1:
+            telegram_posts.sort(
+                key=lambda pd: (pd.get("stats") or {}).get("comments") or 0,
+                reverse=True,
+            )
+            telegram_posts = telegram_posts[:1]
         
         # Telegram
         if telegram_posts:
@@ -498,12 +497,18 @@ async def process_links(
                     if insta_result.top_comments:
                         post_dict["stats"]["top_comments"] = insta_result.top_comments
 
-    # Суммарный охват из API + разбивка по постам для диагностики
-    total_actual = 0
+    result, metrics = await build_report_v2(
+        project_name=project_name or "Без названия",
+        posts_data=list(posts_data),
+        planned_reach=planned_reach,
+        placement_budget=budget,
+        control_total=None,
+    )
+
+    # Разбивка по постам для диагностического сообщения в диалоговом режиме.
     breakdown = []
     for post_dict, post in zip(posts_data, all_posts):
         views = post_dict["stats"].get("views") or 0
-        total_actual += views
         breakdown.append({
             "url": post.post_url,
             "is_organic": post.is_organic,
@@ -512,36 +517,11 @@ async def process_links(
             "tgstat_fallback": post_dict["stats"].get("tgstat_fallback", False),
         })
 
-    # Органика — если передана цифрой вручную, используем её
-    total_organic_reach = organic_reach_manual or sum(
-        p["stats"].get("views") or 0
-        for p, post in zip(posts_data, all_posts)
-        if post.is_organic
-    )
-    if organic_reach_manual:
-        total_actual += organic_reach_manual
-
-    # Экономия = (факт - план) ÷ 2
-    MARKET_CPV = 2.0
-    overreach = total_actual - planned_reach
-    total_savings = max(overreach / MARKET_CPV, 0)
-
-    result = await analyze_campaign(
-        project_name=project_name or "Без названия",
-        posts_data=list(posts_data),
-        total_planned_reach=planned_reach,
-        total_actual_reach=total_actual,
-        total_budget=budget,
-        total_savings=total_savings,
-        total_organic_reach=total_organic_reach,
-        total_placement_budget=budget,  # в диалоговом режиме пользователь вводит бюджет размещений
-    )
-
     # Возвращаем список breakdown в подтипе, который также содержит posts_data.
     # Это позволяет старым вызовам работать (b['url'] и т.п.), а новым — брать .posts_data
     result_breakdown = _BreakdownWithData(breakdown)
     result_breakdown.posts_data = list(posts_data)
-    return result, total_actual, result_breakdown
+    return result, metrics.total_actual, result_breakdown
 
 
 class _BreakdownWithData(list):

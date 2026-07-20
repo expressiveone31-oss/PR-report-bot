@@ -34,7 +34,13 @@ logger = logging.getLogger(__name__)
 
 bot = Bot(
     token=TELEGRAM_BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode="Markdown"),
+    # ВАЖНО: parse_mode=None по умолчанию.
+    # Пользовательский контент часто содержит символы Markdown-разметки
+    # (`, *, _, [, ], —, «», ★), которые Telegram интерпретирует как незакрытые
+    # entity и роняет отправку с TelegramBadRequest 'can't find end of the entity'.
+    # Там где Markdown реально нужен (жирный в приветствиях) — явно указывать
+    # parse_mode="Markdown" в конкретном вызове message.answer.
+    default=DefaultBotProperties(parse_mode=None),
 )
 dp = Dispatcher(storage=MemoryStorage())
 
@@ -132,8 +138,24 @@ def parse_number(text: str) -> float | None:
 
 
 def send_long(text: str, chunk_size: int = 4000) -> list[str]:
-    """Разбивает длинный текст на части."""
-    return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+    """Разбивает текст по строкам, не разрывая таблицы и URL посередине."""
+    chunks: list[str] = []
+    current = ""
+    for line in text.splitlines(keepends=True):
+        if len(line) > chunk_size:
+            if current:
+                chunks.append(current.rstrip())
+                current = ""
+            chunks.extend(line[i:i + chunk_size] for i in range(0, len(line), chunk_size))
+            continue
+        if current and len(current) + len(line) > chunk_size:
+            chunks.append(current.rstrip())
+            current = line
+        else:
+            current += line
+    if current:
+        chunks.append(current.rstrip())
+    return chunks or [""]
 
 
 
@@ -332,7 +354,8 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         "*Собрать отчёт* — /sumup\n"
         "*Обновить охваты в таблице* — /update\n"
         "*Собрать карточку из текста* — /picture\n\n"
-        "Поддерживаю: VK, Telegram, Instagram, YouTube, TikTok, Twitter/X"
+        "Поддерживаю: VK, Telegram, Instagram, YouTube, TikTok, Twitter/X",
+        parse_mode="Markdown",
     )
 
 
@@ -499,7 +522,8 @@ async def got_links_instead_of_csv(message: Message, state: FSMContext) -> None:
             f"Принял *{len(links)}* ссылок.\n\n"
             "Хочешь сравнивать каждый пост с его плановым охватом? "
             "Тогда скинь CSV медиаплана.\n\n"
-            "Если не нужно — напиши *нет*."
+            "Если не нужно — напиши *нет*.",
+            parse_mode="Markdown",
         )
         await state.set_state(ReportStates.waiting_mediaplan_csv)
     else:
@@ -825,7 +849,8 @@ async def got_paid_links(message: Message, state: FSMContext) -> None:
         f"Принял *{len(links)}* ссылок.\n\n"
         "Хочешь чтобы я сравнивал каждый пост с его плановым охватом? "
         "Тогда скинь CSV-выгрузку медиаплана.\n\n"
-        "Если не нужно — напиши *нет*, и я буду сравнивать только общий план."
+        "Если не нужно — напиши *нет*, и я буду сравнивать только общий план.",
+        parse_mode="Markdown",
     )
     await state.set_state(ReportStates.waiting_mediaplan_csv)
 
@@ -835,7 +860,7 @@ async def got_paid_links(message: Message, state: FSMContext) -> None:
 async def got_mediaplan_csv(message: Message, state: FSMContext) -> None:
     doc = message.document
     if not doc.file_name.lower().endswith(".csv"):
-        await message.answer("Нужен файл в формате CSV. Попробуй снова или напиши *нет* чтобы пропустить.")
+        await message.answer("Нужен файл в формате CSV. Попробуй снова или напиши *нет* чтобы пропустить.", parse_mode="Markdown")
         return
 
     file = await bot.get_file(doc.file_id)
@@ -855,11 +880,15 @@ async def got_mediaplan_csv(message: Message, state: FSMContext) -> None:
         await state.update_data(plan_by_url=plan_by_url)
         await message.answer(
             f"Принял медиаплан — нашёл план по *{len(plan_by_url)}* постам.\n\n"
-            "Какой был *плановый охват* по проекту в целом? (число)"
+            "Какой был *плановый охват* по проекту в целом? (число)",
+            parse_mode="Markdown",
         )
     except Exception as e:
         logger.error(f"CSV parse error: {e}")
-        await message.answer("Не удалось разобрать CSV. Продолжим без плана по постам.\n\nКакой был *плановый охват* по проекту? (число)")
+        await message.answer(
+            "Не удалось разобрать CSV. Продолжим без плана по постам.\n\nКакой был *плановый охват* по проекту? (число)",
+            parse_mode="Markdown",
+        )
 
     await state.set_state(ReportStates.waiting_planned_reach)
 
@@ -867,7 +896,10 @@ async def got_mediaplan_csv(message: Message, state: FSMContext) -> None:
 @dp.message(ReportStates.waiting_mediaplan_csv)
 async def skip_mediaplan_csv(message: Message, state: FSMContext) -> None:
     await state.update_data(plan_by_url={})
-    await message.answer("Хорошо, пропускаем.\n\nКакой был *плановый охват* по проекту? (число)")
+    await message.answer(
+        "Хорошо, пропускаем.\n\nКакой был *плановый охват* по проекту? (число)",
+        parse_mode="Markdown",
+    )
     await state.set_state(ReportStates.waiting_planned_reach)
 
 
@@ -881,7 +913,10 @@ async def got_planned_reach(message: Message, state: FSMContext) -> None:
     planned = int(planned)
 
     await state.update_data(planned_reach=planned)
-    await message.answer("Какой *бюджет на размещения* (₽)? Напиши цифрой — только стоимость постов, без менеджмента и доп. расходов.")
+    await message.answer(
+        "Какой *бюджет на размещения* (₽)? Напиши цифрой — только стоимость постов, без менеджмента и доп. расходов.",
+        parse_mode="Markdown",
+    )
     await state.set_state(ReportStates.waiting_budget)
 
 
@@ -897,7 +932,8 @@ async def got_budget(message: Message, state: FSMContext) -> None:
     await message.answer(
         "Есть *органика*?\n\n"
         "• Если да — скинь ссылки или напиши суммарный охват цифрой\n"
-        "• Если нет — напиши *нет*"
+        "• Если нет — напиши *нет*",
+        parse_mode="Markdown",
     )
     await state.set_state(ReportStates.waiting_organic)
 
@@ -924,7 +960,8 @@ async def got_organic(message: Message, state: FSMContext) -> None:
             organic_links = extract_links(text)
             if not organic_links:
                 await message.answer(
-                    "Не понял. Скинь ссылки на органические посты, суммарный охват цифрой, или напиши *нет*"
+                    "Не понял. Скинь ссылки на органические посты, суммарный охват цифрой, или напиши *нет*",
+                    parse_mode="Markdown",
                 )
                 return
 
@@ -964,7 +1001,8 @@ async def got_project_name(message: Message, state: FSMContext) -> None:
         f"Paid постов: *{len(paid_links)}*\n"
         f"Органика: *{organic_str}*\n"
         f"План: *{plan_str}*\n\n"
-        f"Иду за данными через API — это займёт до минуты..."
+        f"Иду за данными через API — это займёт до минуты...",
+        parse_mode="Markdown",
     )
 
     try:
