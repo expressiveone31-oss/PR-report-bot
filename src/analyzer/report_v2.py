@@ -1,6 +1,7 @@
 """Детерминированная сборка внутреннего отчёта /sumup v2."""
 
 import asyncio
+import html
 import json
 import logging
 from dataclasses import dataclass
@@ -25,6 +26,10 @@ PLATFORM_NAMES = {
     "threads": "Threads",
     "unknown": "Площадка не определена",
 }
+MONTHS_RU = (
+    "", "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+)
 
 
 @dataclass
@@ -113,11 +118,18 @@ def _channel_key(post: dict) -> str:
     return f"{post.get('platform', 'unknown')}:{name}"
 
 
-def _parse_date(raw: str | None) -> Optional[date]:
+def _parse_date(raw: str | date | datetime | None) -> Optional[date]:
     if not raw:
         return None
+    if isinstance(raw, datetime):
+        return raw.date()
+    if isinstance(raw, date):
+        return raw
     value = str(raw).strip()
-    for fmt in ("%d.%m.%Y", "%d.%m.%y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+    for fmt in (
+        "%d.%m.%Y", "%d.%m.%y", "%Y-%m-%d", "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S", "%d/%m/%Y", "%d-%m-%Y",
+    ):
         try:
             return datetime.strptime(value, fmt).date()
         except ValueError:
@@ -125,9 +137,17 @@ def _parse_date(raw: str | None) -> Optional[date]:
     return None
 
 
-def _display_date(raw: str | None) -> str:
+def _display_date(raw: str | date | datetime | None) -> str:
     parsed = _parse_date(raw)
-    return parsed.strftime("%d.%m.%Y") if parsed else (str(raw).strip() if raw else "нет данных")
+    return f"{parsed.day} {MONTHS_RU[parsed.month]}" if parsed else "нет данных"
+
+
+def _post_link(post: dict) -> str:
+    name = html.escape(_channel_name(post))
+    url = str(post.get("post_url") or "").strip()
+    if not url:
+        return name
+    return f'<a href="{html.escape(url, quote=True)}">{name}</a>'
 
 
 def resolve_fact_sources(posts_data: list[dict]) -> None:
@@ -186,45 +206,39 @@ def calculate_metrics(
 
 
 def _build_paid_table(posts: list[dict]) -> str:
-    lines = ["Канал | Ссылка | Дата | План | Факт | Δ к плану | Источник"]
+    blocks: list[str] = []
     for post in posts:
         plan = int(post.get("planned_reach") or 0)
         fact = (post.get("stats") or {}).get("views")
         if fact is None:
-            delta = "нет данных"
+            fact_sentence = "Фактический охват — нет данных."
+            delta_sentence = "Отклонение от плана посчитать не удалось."
         elif plan:
             diff = fact - plan
             pct = diff / plan * 100
-            delta = f"{diff:+,} / {pct:+.0f}%".replace(",", " ")
+            fact_sentence = f"Охват по плану — {_num(plan)}, фактический охват — {_num(fact)} просмотров."
+            delta_sentence = (
+                f"{diff:+,} просмотров ({pct:+.0f}%) от запланированного показателя"
+                .replace(",", " ")
+            )
         else:
-            delta = "нет плана"
-        lines.append(
-            " | ".join([
-                _channel_name(post),
-                post.get("post_url") or "нет ссылки",
-                _display_date(post.get("date")),
-                _num(plan),
-                _num(fact),
-                delta,
-                post.get("fact_source") or "нет данных",
-            ])
+            fact_sentence = f"Плановый охват не указан, фактический охват — {_num(fact)} просмотров."
+            delta_sentence = "Отклонение от плана посчитать нельзя."
+        blocks.append(
+            f"{_post_link(post)} | {_display_date(post.get('date'))} | {fact_sentence}\n"
+            f"{delta_sentence}"
         )
-    return "\n".join(lines)
+    return "\n\n".join(blocks)
 
 
 def _build_organic_table(posts: list[dict]) -> str:
-    lines = ["Канал | Ссылка | Дата | Охват | Источник"]
+    blocks = []
     for post in posts:
-        lines.append(
-            " | ".join([
-                _channel_name(post),
-                post.get("post_url") or "нет ссылки",
-                _display_date(post.get("date")),
-                _num((post.get("stats") or {}).get("views")),
-                post.get("fact_source") or "нет данных",
-            ])
+        blocks.append(
+            f"{_post_link(post)} | {_display_date(post.get('date'))} | "
+            f"Охват — {_num((post.get('stats') or {}).get('views'))} просмотров."
         )
-    return "\n".join(lines)
+    return "\n\n".join(blocks)
 
 
 def _superresults(posts_data: list[dict]) -> list[str]:
@@ -236,7 +250,6 @@ def _superresults(posts_data: list[dict]) -> list[str]:
         stats = post.get("stats") or {}
         plan = post.get("planned_reach") or 0
         url = post.get("post_url") or "нет ссылки"
-        name = _channel_name(post)
         parts: list[str] = []
         max_ratio = 0.0
         views = stats.get("views")
@@ -246,7 +259,7 @@ def _superresults(posts_data: list[dict]) -> list[str]:
                 parts.append(f"{_num(views)} просмотров при плане {_num(plan)} ({ratio:.1f}× плана)".replace(".", ","))
                 max_ratio = max(max_ratio, ratio)
             elif ratio >= 1.1:
-                moderate.append((ratio, f"{name} — {url} — {_num(views)} просмотров при плане {_num(plan)} ({ratio:.1f}×, умеренное превышение)".replace(".", ",")))
+                moderate.append((ratio, f"{_post_link(post)} — {_num(views)} просмотров при плане {_num(plan)} ({ratio:.1f}×, умеренное превышение)".replace(".", ",")))
         avg = stats.get("channel_avg") or {}
         n = avg.get("posts_analyzed") or 0
         metric_pairs = [
@@ -261,7 +274,7 @@ def _superresults(posts_data: list[dict]) -> list[str]:
                 parts.append(f"{_num(value)} {label} вместо средних {_num(usual)} (по {n} постам, {ratio:.1f}×)".replace(".", ","))
                 max_ratio = max(max_ratio, ratio)
         if parts:
-            candidates.append((max_ratio, f"{name} — {url} — " + "; ".join(parts)))
+            candidates.append((max_ratio, f"{_post_link(post)} — " + "; ".join(parts)))
     selected = candidates or moderate
     selected.sort(key=lambda item: item[0], reverse=True)
     return [line for _, line in selected[:5]]
@@ -274,25 +287,38 @@ def _engagement_rows(posts_data: list[dict]) -> list[str]:
             continue
         stats = post.get("stats") or {}
         avg = stats.get("channel_avg") or {}
-        name = _channel_name(post)
+        reposts = stats.get("reposts")
+        if reposts is None:
+            reposts = stats.get("forwards")
+        avg_reposts = avg.get("avg_reposts")
+        if avg_reposts is None:
+            avg_reposts = avg.get("avg_forwards")
         metrics = [
-            ("Лайки", stats.get("likes"), avg.get("avg_likes")),
-            ("Комментарии", stats.get("comments"), avg.get("avg_comments")),
-            ("Репосты/пересылки", stats.get("reposts") or stats.get("forwards"), avg.get("avg_reposts") or avg.get("avg_forwards")),
-            ("Реакции", stats.get("reactions_count"), avg.get("avg_reactions")),
+            ("лайков", stats.get("likes"), avg.get("avg_likes")),
+            ("комментариев", stats.get("comments"), avg.get("avg_comments")),
+            ("репостов/пересылок", reposts, avg_reposts),
+            ("реакций", stats.get("reactions_count"), avg.get("avg_reactions")),
         ]
+        comparisons: list[tuple[str, str]] = []
+        max_score = 0.0
         for label, current, usual in metrics:
             if current is None or not usual:
                 continue
             ratio = current / usual
             if ratio >= 1.25:
-                deviation = f"{ratio:.1f}×, выше".replace(".", ",")
+                comparisons.append(("больше", label))
             elif ratio <= 0.6:
-                deviation = f"{ratio:.1f}×, ниже".replace(".", ",")
+                comparisons.append(("меньше", label))
             else:
                 continue
             score = ratio if ratio >= 1 else 1 / max(ratio, 0.001)
-            rows.append((score, f"{name} | {label} | {_num(usual)} | {_num(current)} | {deviation}"))
+            max_score = max(max_score, score)
+        if comparisons:
+            phrases = [
+                f"{direction} {label}" + (" чем обычно" if index == 0 else "")
+                for index, (direction, label) in enumerate(comparisons)
+            ]
+            rows.append((max_score, f"{_post_link(post)} — " + ", ".join(phrases) + "."))
     rows.sort(key=lambda item: item[0], reverse=True)
     return [line for _, line in rows[:15]]
 
@@ -307,14 +333,14 @@ def _chronology(posts_data: list[dict]) -> list[str]:
     if with_dates:
         strongest = max(with_dates, key=lambda item: (item[1].get("stats") or {}).get("views") or 0)
     return [
-        f"Дата запуска: {min(paid_known).strftime('%d.%m.%Y') if paid_known else 'нет данных'}",
-        f"Первые органические публикации: {min(organic_known).strftime('%d.%m.%Y') if organic_known else 'нет данных'}",
+        f"Дата запуска: {_display_date(min(paid_known)) if paid_known else 'нет данных'}",
+        f"Первые органические публикации: {_display_date(min(organic_known)) if organic_known else 'нет данных'}",
         (
-            f"Самая результативная публикация вышла: {strongest[0].strftime('%d.%m.%Y')} "
-            f"({_channel_name(strongest[1])}, {_num((strongest[1].get('stats') or {}).get('views'))} просмотров)"
+            f"Самая результативная публикация вышла: {_display_date(strongest[0])} "
+            f"({_post_link(strongest[1])}, {_num((strongest[1].get('stats') or {}).get('views'))} просмотров)"
             if strongest else "Самая результативная публикация: дата не определена"
         ),
-        f"Данные зафиксированы: {date.today().strftime('%d.%m.%Y')}",
+        f"Данные зафиксированы: {_display_date(date.today())}",
     ]
 
 
@@ -328,7 +354,7 @@ def _flight_dates(posts_data: list[dict]) -> tuple[str, str]:
     ]
     if not dates:
         return "нет данных", "нет данных"
-    return min(dates).strftime("%d.%m.%Y"), max(dates).strftime("%d.%m.%Y")
+    return _display_date(min(dates)), _display_date(max(dates))
 
 
 async def _brief_summary(project_name: str, metrics: ReportMetrics, superresults: list[str]) -> str:
@@ -352,15 +378,20 @@ async def _brief_summary(project_name: str, metrics: ReportMetrics, superresults
         + json.dumps(facts, ensure_ascii=False)
     )
     try:
+        logger.info("Generating brief summary via OpenAI: model=%s", OPENAI_MODEL)
         response = await client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
             timeout=45,
         )
-        return response.choices[0].message.content.strip()
+        result = (response.choices[0].message.content or "").strip()
+        if result:
+            logger.info("Brief summary generated: %s chars", len(result))
+            return result
+        raise ValueError("OpenAI вернул пустой краткий вывод")
     except Exception as exc:
-        logger.warning("Brief summary failed: %s", exc)
+        logger.warning("Brief summary failed, using deterministic fallback: %s", exc)
         return (
             f"Проект собрал {_num(metrics.total_actual)} просмотров: "
             f"{_num(metrics.paid_actual)} на paid-размещениях и {_num(metrics.organic_actual)} органически. "
@@ -426,13 +457,13 @@ async def build_report_v2(
 
     flight_start, flight_end = _flight_dates(posts_data)
     lines = [
-        "КРАТКИЙ ВЫВОД",
+        "<b>КРАТКИЙ ВЫВОД</b>",
         "",
-        str(summary),
+        html.escape(str(summary)),
         "",
-        "ОБЩИЕ РЕЗУЛЬТАТЫ",
+        "<b>ОБЩИЕ РЕЗУЛЬТАТЫ</b>",
         "",
-        f"Проект: {project_name or 'Без названия'}",
+        f"Проект: {html.escape(project_name or 'Без названия')}",
         f"Даты флайта: {flight_start} — {flight_end}",
         f"Плановый paid-охват: {_num(metrics.paid_plan)}",
         f"Фактический paid-охват: {_num(metrics.paid_actual)}",
@@ -449,17 +480,17 @@ async def build_report_v2(
 
     lines.extend([
         "",
-        "PAID-ПОСТЫ",
+        "<b>PAID-ПОСТЫ</b>",
         "",
         _build_paid_table(paid) if paid else "Нет paid-публикаций",
         "",
-        "ОРГАНИКА",
+        "<b>ОРГАНИКА</b>",
         "",
         _build_organic_table(organic) if organic else "Органических публикаций нет",
         "",
         f"Итого органика: {_num(metrics.organic_actual)}",
         "",
-        "ПЕРЕВЫПОЛНЕНИЕ И ЭКОНОМИЯ БЮДЖЕТА",
+        "<b>ПЕРЕВЫПОЛНЕНИЕ И ЭКОНОМИЯ БЮДЖЕТА</b>",
         "",
         paid_result,
         f"Органический охват: {_num(metrics.organic_actual)} просмотров",
@@ -470,22 +501,25 @@ async def build_report_v2(
         ),
         "Формула: органический охват × 1,5 ₽.",
         "",
-        "ХРОНОЛОГИЯ",
+        "<b>ХРОНОЛОГИЯ</b>",
         "",
         *(_chronology(posts_data)),
         "",
-        "СВЕРХРЕЗУЛЬТАТЫ",
+        "<b>СВЕРХРЕЗУЛЬТАТЫ</b>",
         "",
         *(superresults or ["Сильных отклонений от плана и нормы канала не найдено."]),
         "",
-        "АНАЛИТИКА ВОВЛЕЧЁННОСТИ",
+        "<b>АНАЛИТИКА ВОВЛЕЧЁННОСТИ</b>",
         "",
-        "Канал | Метрика | Обычно | В посеве | Отклонение",
         *(engagement or ["Заметных отклонений по доступным метрикам не найдено."]),
         "",
-        "КОММЕНТАРИИ",
+        "<b>О ЧЁМ ПИСАЛИ В КОММЕНТАРИЯХ</b>",
         "",
-        f"Комментарии проанализированы по {len(comments_posts)} публикациям из {len(posts_data)}.",
-        comments_text or "Тексты комментариев для анализа не получены.",
+        (
+            f"Комментарии проанализированы по {len(comments_posts)} "
+            f"{_plural(len(comments_posts), 'публикации', 'публикациям', 'публикациям')} "
+            f"из {len(posts_data)}."
+        ),
+        html.escape(comments_text) if comments_text else "Тексты комментариев для анализа не получены.",
     ])
     return "\n".join(lines), metrics

@@ -500,7 +500,7 @@ async def got_csv_mediaplan(message: Message, state: FSMContext) -> None:
 
     await state.clear()
     for chunk in send_long(result):
-        await message.answer(chunk, parse_mode=None)
+        await message.answer(chunk, parse_mode="HTML")
 
     # Дополнительный блок: готовые данные для команды /picture
     try:
@@ -1045,7 +1045,7 @@ async def got_project_name(message: Message, state: FSMContext) -> None:
 
     # Затем акценты — отправляем без Markdown чтобы избежать ошибок парсинга
     for chunk in send_long(result):
-        await message.answer(chunk, parse_mode=None)
+        await message.answer(chunk, parse_mode="HTML")
 
     # Дополнительный блок: готовые данные для команды /picture.
     # posts_data лежат в _BreakdownWithData как атрибут.

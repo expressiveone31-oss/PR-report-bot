@@ -2,6 +2,9 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from src.analyzer.report_v2 import (
+    _build_paid_table,
+    _display_date,
+    _engagement_rows,
     build_report_v2,
     calculate_metrics,
     resolve_fact_sources,
@@ -33,6 +36,34 @@ def post(
 
 
 class ReportV2Tests(unittest.IsolatedAsyncioTestCase):
+    def test_excel_datetime_and_human_paid_format(self):
+        item = post(
+            "курОлеся", "instagram", "https://www.instagram.com/reel/Da2mSdPq7RF/",
+            views=46040, planned=60000, date="2026-07-16 00:00:00",
+        )
+        resolve_fact_sources([item])
+        text = _build_paid_table([item])
+        self.assertEqual(_display_date("2026-07-16 00:00:00"), "16 июля")
+        self.assertIn('<a href="https://www.instagram.com/reel/Da2mSdPq7RF/">курОлеся</a>', text)
+        self.assertIn("16 июля", text)
+        self.assertIn("Охват по плану — 60 000, фактический охват — 46 040 просмотров", text)
+        self.assertIn("-13 960 просмотров (-23%)", text)
+
+    def test_engagement_is_grouped_in_words_and_keeps_zero(self):
+        item = post("Смешные Видео", "instagram", "https://instagram.com/reel/x", views=100)
+        item["stats"].update({
+            "likes": 200,
+            "comments": 0,
+            "reposts": 2,
+            "channel_avg": {"avg_likes": 100, "avg_comments": 10, "avg_reposts": 10},
+        })
+        rows = _engagement_rows([item])
+        self.assertEqual(len(rows), 1)
+        self.assertIn("больше лайков чем обычно", rows[0])
+        self.assertIn("меньше комментариев", rows[0])
+        self.assertIn("меньше репостов/пересылок", rows[0])
+        self.assertIn('<a href="https://instagram.com/reel/x">Смешные Видео</a>', rows[0])
+
     def test_api_priority_mp_fallback_and_no_double_count(self):
         posts = [
             post("Paid API", "vk", "https://vk.com/wall-1_1", views=120, mp_views=100, planned=80),
@@ -95,17 +126,31 @@ class ReportV2Tests(unittest.IsolatedAsyncioTestCase):
             "ХРОНОЛОГИЯ",
             "СВЕРХРЕЗУЛЬТАТЫ",
             "АНАЛИТИКА ВОВЛЕЧЁННОСТИ",
-            "КОММЕНТАРИИ",
+            "О ЧЁМ ПИСАЛИ В КОММЕНТАРИЯХ",
         ):
             self.assertIn(heading, text)
-        self.assertIn("Источник", text)
         self.assertIn("Контрольный итог в МП: 230", text)
         self.assertIn("Пересчитанный актуальный итог: 250", text)
         self.assertIn("Формула: органический охват × 1,5 ₽", text)
         self.assertIn("Paid: 1 публикация в 1 канале", text)
         self.assertIn("Органика: 1 публикация в 1 канале", text)
-        self.assertIn("Даты флайта: 01.07.2026 — 01.07.2026", text)
-        self.assertIn("Первые органические публикации: 03.07.2026", text)
+        self.assertIn("Даты флайта: 1 июля — 1 июля", text)
+        self.assertIn("Первые органические публикации: 3 июля", text)
+
+    @patch("src.analyzer.openai_analyzer._analyze_comments", new_callable=AsyncMock)
+    @patch("src.analyzer.report_v2._brief_summary", new_callable=AsyncMock)
+    async def test_comments_analysis_is_included(self, summary, comments):
+        summary.return_value = "Короткий вывод."
+        comments.return_value = (
+            "О чём писали в комментариях:\n\n"
+            "ПОСТ 1: обсуждали конкретную сцену и героя."
+        )
+        item = post("Канал", "youtube", "https://youtube.com/watch?v=x", views=100)
+        item["stats"].update({"comments": 20, "top_comments": ["Комментарий"]})
+        text, _ = await build_report_v2("Тест", [item], 50, 100)
+        self.assertIn("<b>О ЧЁМ ПИСАЛИ В КОММЕНТАРИЯХ</b>", text)
+        self.assertIn("Комментарии проанализированы по 1 публикации из 1", text)
+        self.assertIn("обсуждали конкретную сцену и героя", text)
 
 
 if __name__ == "__main__":
