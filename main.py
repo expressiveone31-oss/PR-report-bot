@@ -616,13 +616,24 @@ async def got_picture_text(message: Message, state: FSMContext) -> None:
     # CardData — dataclass, сериализуем в dict для FSM хранилища.
     from dataclasses import asdict
 
-    sent = await message.answer(
-        "Вот что понял:\n\n"
-        + preview
-        + "\n\nСгенерить карточку? Если есть правки — отправь их "
-        "обратным сообщением, я пересоберу.",
-        reply_markup=_picture_confirm_kb(),
-    )
+    # parse_mode=None — превью содержит «», _, —, ★ и пр., что ломает Markdown
+    try:
+        sent = await message.answer(
+            "Вот что понял:\n\n"
+            + preview
+            + "\n\nСгенерить карточку? Если есть правки — отправь их "
+            "обратным сообщением, я пересоберу.",
+            reply_markup=_picture_confirm_kb(),
+            parse_mode=None,
+        )
+    except Exception as e:
+        logger.error(f"got_picture_text: failed to send preview: {e}", exc_info=True)
+        await message.answer(
+            f"Не смог показать превью: {type(e).__name__}. Попробуй /picture заново.",
+            parse_mode=None,
+        )
+        await state.clear()
+        return
 
     await state.update_data(
         card=asdict(card),
@@ -684,7 +695,8 @@ async def picture_confirm(cb: CallbackQuery, state: FSMContext) -> None:
                 f"Тип: {err_class}\n"
                 f"Причина: {short_msg}\n\n"
                 f"Скорее всего на сервере не установлены системные библиотеки "
-                f"(cairo/pango/шрифты). Напиши админу — я передам детали в логи."
+                f"(cairo/pango/шрифты). Напиши админу — я передам детали в логи.",
+                parse_mode=None,
             )
         await state.clear()
         await cb.answer()
@@ -756,15 +768,27 @@ async def got_picture_edits(message: Message, state: FSMContext) -> None:
         await _clear_preview_keyboard(message.chat.id, old_preview_id)
 
     # Показываем новое превью и запоминаем его message_id.
+    # parse_mode=None — те же спецсимволы что и в первом превью.
     from dataclasses import asdict
     preview_text = format_preview(revised)
-    sent = await message.answer(
-        "Обновил. Проверь:\n\n"
-        + preview_text
-        + "\n\nСгенерить карточку? Если ещё что-то не так — "
-        "отправь правки следующим сообщением.",
-        reply_markup=_picture_confirm_kb(),
-    )
+    try:
+        sent = await message.answer(
+            "Обновил. Проверь:\n\n"
+            + preview_text
+            + "\n\nСгенерить карточку? Если ещё что-то не так — "
+            "отправь правки следующим сообщением.",
+            reply_markup=_picture_confirm_kb(),
+            parse_mode=None,
+        )
+    except Exception as e:
+        logger.error(f"got_picture_edits: failed to send preview: {e}", exc_info=True)
+        await message.answer(
+            f"Не смог показать обновлённое превью: {type(e).__name__}. "
+            "Правка не применена, попробуй сформулировать иначе.",
+            parse_mode=None,
+        )
+        # Старая карточка в state остаётся — юзер может продолжать с ней
+        return
     await state.update_data(
         card=asdict(revised),
         preview_message_id=sent.message_id,
