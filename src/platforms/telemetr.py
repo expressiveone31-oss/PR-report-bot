@@ -33,6 +33,7 @@ class TelemetrPostStats:
     comments: Optional[int] = None
     channel_title: Optional[str] = None
     channel_subscribers: Optional[int] = None
+    published_at: Optional[str] = None
     channel_avg: Optional[ChannelAverage] = None
     error: Optional[str] = None
 
@@ -137,5 +138,9 @@ async def get_post_stats(post_url: str) -> TelemetrPostStats:
         comments=stats.get("comments"),
         channel_title=channel_title,
         channel_subscribers=channel_subscribers,
+        published_at=str(
+            item.get("date") or item.get("post_date") or item.get("published_at")
+            or item.get("created_at") or item.get("timestamp") or item.get("created") or ""
+        ) or None,
         channel_avg=channel_avg,
     )

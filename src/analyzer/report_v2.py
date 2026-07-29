@@ -5,7 +5,7 @@ import html
 import json
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from openai import AsyncOpenAI
@@ -126,9 +126,22 @@ def _parse_date(raw: str | date | datetime | None) -> Optional[date]:
     if isinstance(raw, date):
         return raw
     value = str(raw).strip()
+    if value.isdigit():
+        try:
+            timestamp = int(value)
+            if timestamp > 10_000_000_000:
+                timestamp //= 1000
+            return datetime.fromtimestamp(timestamp, tz=timezone.utc).date()
+        except (OverflowError, OSError, ValueError):
+            pass
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+    except ValueError:
+        pass
     for fmt in (
         "%d.%m.%Y", "%d.%m.%y", "%Y-%m-%d", "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S", "%d/%m/%Y", "%d-%m-%Y",
+        "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S%z",
+        "%a %b %d %H:%M:%S %z %Y", "%d/%m/%Y", "%d-%m-%Y",
     ):
         try:
             return datetime.strptime(value, fmt).date()
@@ -323,6 +336,95 @@ def _engagement_rows(posts_data: list[dict]) -> list[str]:
     return [line for _, line in rows[:15]]
 
 
+def _generalized_engagement(posts_data: list[dict]) -> str:
+    """Обобщает вовлечённость по всему paid-посеву по старой методологии."""
+    metric_specs = (
+        ("лайков/реакций", "likes"),
+        ("комментариев", "comments"),
+        ("репостов/пересылок", "reposts"),
+    )
+    outcomes: list[str] = []
+
+    for label, metric in metric_specs:
+        classified: list[dict] = []
+        for post in posts_data:
+            if post.get("is_organic"):
+                continue
+            stats = post.get("stats") or {}
+            avg = stats.get("channel_avg") or {}
+
+            if metric == "likes":
+                current = stats.get("likes")
+                usual = avg.get("avg_likes")
+                if current is None:
+                    current = stats.get("reactions_count")
+                if usual is None:
+                    usual = avg.get("avg_reactions")
+            elif metric == "reposts":
+                current = stats.get("reposts")
+                usual = avg.get("avg_reposts")
+                if current is None:
+                    current = stats.get("forwards")
+                if usual is None:
+                    usual = avg.get("avg_forwards")
+            else:
+                current = stats.get("comments")
+                usual = avg.get("avg_comments")
+
+            if current is None or not usual:
+                continue
+            ratio = current / usual
+            category = "more" if ratio >= 1.25 else "less" if ratio <= 0.6 else "same"
+            classified.append({
+                "category": category,
+                "ratio": ratio,
+                "current": current,
+                "usual": usual,
+                "post": post,
+            })
+
+        if not classified:
+            continue
+
+        counts = {
+            category: sum(1 for item in classified if item["category"] == category)
+            for category in ("more", "less", "same")
+        }
+        max_count = max(counts.values())
+        winners = [category for category, count in counts.items() if count == max_count]
+        if len(winners) != 1:
+            outcomes.append(f"количество {label} различалось от канала к каналу")
+            continue
+
+        winner = winners[0]
+        if winner == "same":
+            outcomes.append(f"обычное количество {label}")
+            continue
+
+        matching = [item for item in classified if item["category"] == winner]
+        example = (
+            max(matching, key=lambda item: item["ratio"])
+            if winner == "more"
+            else min(matching, key=lambda item: item["ratio"])
+        )
+        direction = "больше" if winner == "more" else "меньше"
+        outcomes.append(
+            f"{direction} {label} (сильнее всего у {_post_link(example['post'])} — "
+            f"{_num(example['current'])} вместо примерно {_num(example['usual'])} обычно)"
+        )
+
+    if not outcomes:
+        return "Недостаточно данных о средних показателях каналов для сравнения вовлечённости."
+    if len(outcomes) == 1:
+        joined = outcomes[0]
+    else:
+        joined = ", ".join(outcomes[:-1]) + " и " + outcomes[-1]
+    return (
+        "Если сравнивать посты посева с обычными публикациями на тех же каналах, "
+        f"они в среднем набирали {joined}."
+    )
+
+
 def _chronology(posts_data: list[dict]) -> list[str]:
     paid_dates = [(_parse_date(p.get("date")), p) for p in posts_data if not p.get("is_organic")]
     organic_dates = [(_parse_date(p.get("date")), p) for p in posts_data if p.get("is_organic")]
@@ -332,7 +434,13 @@ def _chronology(posts_data: list[dict]) -> list[str]:
     strongest = None
     if with_dates:
         strongest = max(with_dates, key=lambda item: (item[1].get("stats") or {}).get("views") or 0)
+    all_known = paid_known + organic_known
+    period = (
+        f"Период посева: с {_display_date(min(all_known))} по {_display_date(max(all_known))}"
+        if all_known else "Период посева: нет данных"
+    )
     return [
+        period,
         f"Дата запуска: {_display_date(min(paid_known)) if paid_known else 'нет данных'}",
         f"Первые органические публикации: {_display_date(min(organic_known)) if organic_known else 'нет данных'}",
         (
@@ -348,7 +456,6 @@ def _flight_dates(posts_data: list[dict]) -> tuple[str, str]:
     dates = [
         parsed
         for post in posts_data
-        if not post.get("is_organic")
         for parsed in [_parse_date(post.get("date"))]
         if parsed
     ]
@@ -411,11 +518,16 @@ async def build_report_v2(
     paid = [p for p in posts_data if not p.get("is_organic")]
     organic = [p for p in posts_data if p.get("is_organic")]
     superresults = _superresults(posts_data)
-    engagement = _engagement_rows(posts_data)
+    engagement_summary = _generalized_engagement(posts_data)
 
     from src.analyzer.openai_analyzer import _analyze_comments
 
-    comments_posts = [p for p in posts_data if (p.get("stats") or {}).get("top_comments")]
+    comments_available = [p for p in posts_data if (p.get("stats") or {}).get("top_comments")]
+    comments_posts = sorted(
+        comments_available,
+        key=lambda post: (post.get("stats") or {}).get("comments") or 0,
+        reverse=True,
+    )[:5]
     summary_task = _brief_summary(project_name, metrics, superresults)
     comments_task = _analyze_comments(comments_posts) if comments_posts else None
     if comments_task:
@@ -480,10 +592,6 @@ async def build_report_v2(
 
     lines.extend([
         "",
-        "<b>PAID-ПОСТЫ</b>",
-        "",
-        _build_paid_table(paid) if paid else "Нет paid-публикаций",
-        "",
         "<b>ОРГАНИКА</b>",
         "",
         _build_organic_table(organic) if organic else "Органических публикаций нет",
@@ -509,16 +617,21 @@ async def build_report_v2(
         "",
         *(superresults or ["Сильных отклонений от плана и нормы канала не найдено."]),
         "",
-        "<b>АНАЛИТИКА ВОВЛЕЧЁННОСТИ</b>",
+        "<b>АНАЛИТИКА ПО ЛАЙКАМ, КОММЕНТАРИЯМ И РЕПОСТАМ</b>",
         "",
-        *(engagement or ["Заметных отклонений по доступным метрикам не найдено."]),
+        engagement_summary,
         "",
         "<b>О ЧЁМ ПИСАЛИ В КОММЕНТАРИЯХ</b>",
         "",
         (
-            f"Комментарии проанализированы по {len(comments_posts)} "
-            f"{_plural(len(comments_posts), 'публикации', 'публикациям', 'публикациям')} "
-            f"из {len(posts_data)}."
+            (
+                f"Комментарии проанализированы по 5 наиболее обсуждаемым публикациям "
+                f"из {len(posts_data)}."
+                if len(comments_posts) == 5
+                else f"Комментарии проанализированы по {len(comments_posts)} "
+                f"{_plural(len(comments_posts), 'публикации', 'публикациям', 'публикациям')} "
+                f"из {len(posts_data)}."
+            )
         ),
         html.escape(comments_text) if comments_text else "Тексты комментариев для анализа не получены.",
     ])

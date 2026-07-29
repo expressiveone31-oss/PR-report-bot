@@ -46,6 +46,7 @@ class TwitterPostStats:
     bookmarks: Optional[int] = None
     channel_title: Optional[str] = None
     channel_username: Optional[str] = None
+    published_at: Optional[str] = None
     channel_avg: Optional[ChannelAverage] = None
     error: Optional[str] = None
 
@@ -189,6 +190,7 @@ async def get_post_stats(post_url: str) -> TwitterPostStats:
             retweets  = safe_int(data.get("retweets"))
             replies   = safe_int(data.get("replies"))
             bookmarks = safe_int(data.get("bookmarks"))
+            published_at = data.get("created_at") or data.get("createdAt")
 
             # Автор
             author = data.get("author") or {}
@@ -220,6 +222,7 @@ async def get_post_stats(post_url: str) -> TwitterPostStats:
             bookmarks=bookmarks,
             channel_title=channel_title,
             channel_username=channel_username,
+            published_at=str(published_at) if published_at else None,
             channel_avg=channel_avg,
         )
     except asyncio.TimeoutError:

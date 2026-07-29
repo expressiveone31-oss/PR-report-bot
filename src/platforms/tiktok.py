@@ -10,6 +10,7 @@ TikTok модуль через Tikfly API (RapidAPI).
 import re
 import logging
 import aiohttp
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Optional
 from src.config import TIKTOK_RAPIDAPI_KEY
@@ -42,6 +43,7 @@ class TikTokPostStats:
     shares: Optional[int] = None
     channel_title: Optional[str] = None
     channel_username: Optional[str] = None
+    published_at: Optional[str] = None
     top_comments: list[str] = field(default_factory=list)
     channel_avg: Optional[ChannelAverage] = None
     error: Optional[str] = None
@@ -182,6 +184,11 @@ async def get_post_stats(post_url: str, fetch_comments: bool = False) -> TikTokP
         shares   = safe_int(stats.get("shareCount"))
         channel_title    = author.get("nickname")
         channel_username = author.get("uniqueId")
+        create_time = item.get("createTime")
+        published_at = (
+            datetime.fromtimestamp(int(create_time), tz=timezone.utc).isoformat()
+            if create_time else None
+        )
 
         # Средние по каналу
         channel_avg = ChannelAverage()
@@ -207,6 +214,7 @@ async def get_post_stats(post_url: str, fetch_comments: bool = False) -> TikTokP
         shares=shares,
         channel_title=channel_title,
         channel_username=channel_username,
+        published_at=published_at,
         top_comments=top_comments,
         channel_avg=channel_avg,
     )

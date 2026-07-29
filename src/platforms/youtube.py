@@ -36,6 +36,7 @@ class YouTubePostStats:
     top_comments: list[str] = field(default_factory=list)
     channel_title: Optional[str] = None
     channel_id: Optional[str] = None
+    published_at: Optional[str] = None
     channel_avg: Optional[ChannelAverage] = None
     error: Optional[str] = None
 
@@ -236,6 +237,7 @@ async def get_post_stats(post_url: str) -> YouTubePostStats:
         comments = int(stats.get("commentCount", 0)) or None
         channel_title = snippet.get("channelTitle")
         channel_id    = snippet.get("channelId")
+        published_at  = snippet.get("publishedAt")
 
         # Средние по каналу
         channel_avg = ChannelAverage()
@@ -262,5 +264,6 @@ async def get_post_stats(post_url: str) -> YouTubePostStats:
         top_comments=top_comments,
         channel_title=channel_title,
         channel_id=channel_id,
+        published_at=published_at,
         channel_avg=channel_avg,
     )

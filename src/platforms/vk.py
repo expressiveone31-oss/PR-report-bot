@@ -7,6 +7,7 @@ import re
 import ssl
 import certifi
 import aiohttp
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Optional
 from src.config import VK_ACCESS_TOKEN
@@ -37,6 +38,7 @@ class VKPostStats:
     reposts: Optional[int] = None
     comments: Optional[int] = None
     channel_title: Optional[str] = None
+    published_at: Optional[str] = None
     top_comments: list[str] = field(default_factory=list)
     channel_avg: Optional[ChannelAverage] = None
     error: Optional[str] = None
@@ -139,6 +141,10 @@ async def get_post_stats(post_url: str) -> VKPostStats:
             reposts=item.get("reposts", {}).get("count") if isinstance(item.get("reposts"), dict) else item.get("reposts"),
             comments=item.get("comments", {}).get("count") if isinstance(item.get("comments"), dict) else item.get("comments"),
             channel_title=channel_title,
+            published_at=(
+                datetime.fromtimestamp(item["date"], tz=timezone.utc).isoformat()
+                if item.get("date") else None
+            ),
             channel_avg=ChannelAverage(),
         )
 
@@ -236,6 +242,10 @@ async def get_post_stats(post_url: str) -> VKPostStats:
         reposts=reposts,
         comments=comments_count,
         channel_title=channel_title,
+        published_at=(
+            datetime.fromtimestamp(item["date"], tz=timezone.utc).isoformat()
+            if item.get("date") else None
+        ),
         top_comments=top_comments,
         channel_avg=channel_avg,
     )

@@ -10,6 +10,7 @@ HikerAPI модуль для Instagram.
 import re
 import logging
 import aiohttp
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Optional
 from src.config import HIKERAPI_TOKEN
@@ -39,6 +40,7 @@ class InstagramPostStats:
     saves: Optional[int] = None
     post_type: Optional[str] = None      # photo | video | reel
     author: Optional[str] = None
+    published_at: Optional[str] = None
     channel_avg: Optional[ChannelAverage] = None
     error: Optional[str] = None
 
@@ -153,6 +155,11 @@ async def get_post_stats(post_url: str) -> InstagramPostStats:
         likes   = media.get("like_count")
         comments = media.get("comment_count")
         saves   = media.get("saved_count")
+        published_raw = media.get("taken_at") or media.get("taken_at_ts")
+        if isinstance(published_raw, (int, float)):
+            published_at = datetime.fromtimestamp(published_raw, tz=timezone.utc).isoformat()
+        else:
+            published_at = str(published_raw) if published_raw else None
 
         edge_reshares = media.get("edge_web_media_to_related_media", {})
         reposts = edge_reshares.get("count") if isinstance(edge_reshares, dict) else None
@@ -180,5 +187,6 @@ async def get_post_stats(post_url: str) -> InstagramPostStats:
         saves=saves,
         post_type=post_type,
         author=author,
+        published_at=published_at,
         channel_avg=channel_avg,
     )

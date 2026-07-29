@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 async def _fetch_stats_for_post(post: Post) -> dict:
     """Идёт за статистикой на нужную платформу."""
     stats = {}
+    api_published_at = None
 
     try:
         if post.platform == "vk" and post.post_url:
@@ -41,6 +42,7 @@ async def _fetch_stats_for_post(post: Post) -> dict:
                 "top_comments": result.top_comments,
                 "error": result.error,
             }
+            api_published_at = result.published_at
             if result.channel_avg and result.channel_avg.posts_analyzed > 0:
                 stats["channel_avg"] = {
                     "avg_views": result.channel_avg.avg_views,
@@ -64,6 +66,7 @@ async def _fetch_stats_for_post(post: Post) -> dict:
                 "channel_subscribers": result.channel_subscribers,
                 "error": result.error,
             }
+            api_published_at = result.published_at
             if result.channel_avg and result.channel_avg.posts_analyzed > 0:
                 stats["channel_avg"] = {
                     "avg_views": result.channel_avg.avg_views,
@@ -94,6 +97,7 @@ async def _fetch_stats_for_post(post: Post) -> dict:
                 stats["channel_subscribers"] = fallback.channel_subscribers or stats.get("channel_subscribers")
                 stats["error"] = None
                 stats["tgstat_fallback"] = True
+                api_published_at = fallback.published_at or api_published_at
             elif result.error and not fallback.error and tgstat_views > 0:
                 logger.info(f"TGStat used (telemetr error): tgstat={tgstat_views}")
                 if fallback.channel_title:
@@ -105,6 +109,7 @@ async def _fetch_stats_for_post(post: Post) -> dict:
                 stats["channel_subscribers"] = fallback.channel_subscribers
                 stats["error"] = None
                 stats["tgstat_fallback"] = True
+                api_published_at = fallback.published_at or api_published_at
             else:
                 logger.info(f"Telemetr wins or TGStat failed: telemetr={telemetr_views}, tgstat={tgstat_views}, tgstat_err={fallback.error}")
 
@@ -127,6 +132,7 @@ async def _fetch_stats_for_post(post: Post) -> dict:
                 "error": result.error,
                 "_instagram_media_id": result.media_id,  # сохраняем для второго прохода
             }
+            api_published_at = result.published_at
             if result.channel_avg and result.channel_avg.posts_analyzed > 0:
                 stats["channel_avg"] = {
                     "avg_views": result.channel_avg.avg_views,
@@ -153,6 +159,7 @@ async def _fetch_stats_for_post(post: Post) -> dict:
                 "top_comments": result.top_comments,  # YouTube собирает комментарии сразу
                 "error": result.error,
             }
+            api_published_at = result.published_at
             if result.channel_avg and result.channel_avg.posts_analyzed > 0:
                 stats["channel_avg"] = {
                     "avg_views": result.channel_avg.avg_views,
@@ -175,6 +182,7 @@ async def _fetch_stats_for_post(post: Post) -> dict:
                 "top_comments": result.top_comments,
                 "error": result.error,
             }
+            api_published_at = result.published_at
             if result.channel_avg and result.channel_avg.posts_analyzed > 0:
                 stats["channel_avg"] = {
                     "avg_views": result.channel_avg.avg_views,
@@ -197,6 +205,7 @@ async def _fetch_stats_for_post(post: Post) -> dict:
                 "comments": result.replies,
                 "error": result.error,
             }
+            api_published_at = result.published_at
             # top_comments — только у twitter241 (у старого api45 этого поля нет)
             top_comments = getattr(result, "top_comments", []) or []
             if top_comments:
@@ -227,7 +236,8 @@ async def _fetch_stats_for_post(post: Post) -> dict:
         "platform": post.platform,
         "is_organic": post.is_organic,
         "post_url": post.post_url,
-        "date": post.date,
+        "date": api_published_at or post.date,
+        "date_source": "API" if api_published_at else ("МП" if post.date else "нет данных"),
         "planned_reach": post.planned_reach,
         "mp_actual_reach": post.actual_reach,
         "actual_cpv": post.actual_cpv,
@@ -295,6 +305,12 @@ async def process_mediaplan_full(
         # Разделяем посты по платформам
         telegram_posts = [pd for pd in posts_needing_comments if pd.get("platform") == "telegram"]
         instagram_posts = [pd for pd in posts_needing_comments if pd.get("platform") == "instagram"]
+
+        instagram_posts.sort(
+            key=lambda pd: (pd.get("stats") or {}).get("comments") or 0,
+            reverse=True,
+        )
+        instagram_posts = instagram_posts[:5]
 
         # На Railway telegram92 разрешает 1 запрос в минуту. Для отчёта берём
         # только самый обсуждаемый Telegram-пост, иначе 10 постов = 9 минут ожидания.
@@ -461,6 +477,12 @@ async def process_links(
         # Разделяем по платформам
         telegram_posts = [pd for pd in posts_needing_comments if pd.get("platform") == "telegram"]
         instagram_posts = [pd for pd in posts_needing_comments if pd.get("platform") == "instagram"]
+
+        instagram_posts.sort(
+            key=lambda pd: (pd.get("stats") or {}).get("comments") or 0,
+            reverse=True,
+        )
+        instagram_posts = instagram_posts[:5]
 
         if not PYROGRAM_AVAILABLE and len(telegram_posts) > 1:
             telegram_posts.sort(

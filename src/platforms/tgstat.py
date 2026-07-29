@@ -25,6 +25,7 @@ class TGStatPostStats:
     comments: Optional[int] = None
     channel_title: Optional[str] = None
     channel_subscribers: Optional[int] = None
+    published_at: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -55,6 +56,10 @@ def _parse_item(post_url: str, item: dict) -> TGStatPostStats:
         comments=item.get("commentsCount") or item.get("comments"),
         channel_title=item.get("channelTitle"),
         channel_subscribers=item.get("channelMembersCount"),
+        published_at=str(
+            item.get("date") or item.get("post_date") or item.get("publishedAt")
+            or item.get("created_at") or item.get("timestamp") or item.get("created") or ""
+        ) or None,
     )
 
 

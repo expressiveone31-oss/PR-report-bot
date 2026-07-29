@@ -56,6 +56,7 @@ class TwitterPostStats:
     bookmarks: Optional[int] = None
     channel_title: Optional[str] = None
     channel_username: Optional[str] = None
+    published_at: Optional[str] = None
     channel_avg: Optional[ChannelAverage] = None
     top_comments: list[str] = field(default_factory=list)
     error: Optional[str] = None
@@ -161,6 +162,7 @@ def _parse_tweet_payload(payload: dict) -> dict:
             "replies": _safe_int(_dig(legacy, "reply_count")),
             "bookmarks": _safe_int(_dig(legacy, "bookmark_count")),
             "views": views,
+            "published_at": _dig(legacy, "created_at", "createdAt"),
             "author": root.get("core", {}).get("user_results", {}).get("result", {}).get("legacy", {}),
         }
 
@@ -174,6 +176,7 @@ def _parse_tweet_payload(payload: dict) -> dict:
         "replies": _safe_int(_dig(root, "replies", "reply_count")),
         "bookmarks": _safe_int(_dig(root, "bookmarks", "bookmark_count")),
         "views": _safe_int(_dig(root, "views", "view_count", "impressions")),
+        "published_at": _dig(root, "created_at", "createdAt", "date"),
         "author": {
             "name": _dig(author, "name", "full_name"),
             "screen_name": _dig(author, "screen_name", "screenname", "username"),
@@ -290,6 +293,7 @@ async def get_post_stats(post_url: str) -> TwitterPostStats:
             bookmarks=parsed.get("bookmarks"),
             channel_title=channel_title,
             channel_username=channel_username,
+            published_at=(str(parsed.get("published_at")) if parsed.get("published_at") else None),
             channel_avg=channel_avg,
             top_comments=top_comments,
         )
