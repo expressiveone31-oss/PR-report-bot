@@ -129,7 +129,6 @@ class ReportV2Tests(unittest.IsolatedAsyncioTestCase):
         for heading in (
             "КРАТКИЙ ВЫВОД",
             "ОБЩИЕ РЕЗУЛЬТАТЫ",
-            "ОРГАНИКА",
             "ПЕРЕВЫПОЛНЕНИЕ И ЭКОНОМИЯ БЮДЖЕТА",
             "ХРОНОЛОГИЯ",
             "СВЕРХРЕЗУЛЬТАТЫ",
@@ -138,6 +137,8 @@ class ReportV2Tests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertIn(heading, text)
         self.assertNotIn("PAID-ПОСТЫ", text)
+        self.assertNotIn("<b>ОРГАНИКА</b>", text)
+        self.assertNotIn("Итого органика:", text)
         self.assertNotIn("АНАЛИТИКА ВОВЛЕЧЁННОСТИ", text)
         self.assertIn("Контрольный итог в МП: 230", text)
         self.assertIn("Пересчитанный актуальный итог: 250", text)

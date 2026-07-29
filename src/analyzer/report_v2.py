@@ -592,12 +592,6 @@ async def build_report_v2(
 
     lines.extend([
         "",
-        "<b>ОРГАНИКА</b>",
-        "",
-        _build_organic_table(organic) if organic else "Органических публикаций нет",
-        "",
-        f"Итого органика: {_num(metrics.organic_actual)}",
-        "",
         "<b>ПЕРЕВЫПОЛНЕНИЕ И ЭКОНОМИЯ БЮДЖЕТА</b>",
         "",
         paid_result,
