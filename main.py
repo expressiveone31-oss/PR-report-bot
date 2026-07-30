@@ -65,6 +65,11 @@ class PictureStates(StatesGroup):
     waiting_confirm = State()   # шаг 2: показали превью, ждём подтверждения
 
 
+class ExternalStates(StatesGroup):
+    """FSM /forexternal: принимаем полный внутренний отчёт частями."""
+    waiting_report_parts = State()
+
+
 def _detect_mp_type(content: str) -> str:
     """
     Определяет тип МП: 'target' или 'posev'.
@@ -94,6 +99,51 @@ def _detect_mp_type(content: str) -> str:
 def extract_links(text: str) -> list[str]:
     """Вытаскивает все http-ссылки из текста."""
     return re.findall(r'https?://\S+', text)
+
+
+def _utf16_offset_to_index(text: str, offset: int) -> int:
+    """Telegram entities используют UTF-16 offset, Python-строки — Unicode index."""
+    units = 0
+    for index, char in enumerate(text):
+        if units >= offset:
+            return index
+        units += len(char.encode("utf-16-le")) // 2
+    return len(text)
+
+
+def _escape_markdown_link_label(text: str) -> str:
+    """Экранирует только символы, которые ломают Markdown-ссылку."""
+    return (
+        text.replace("\\", "\\\\")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+        .replace("(", "\\(")
+        .replace(")", "\\)")
+    )
+
+
+def message_to_external_markdown(message: Message) -> str:
+    """
+    Восстанавливает скрытые URL из Telegram text_link entities.
+
+    /sumup отправляет HTML-ссылки вида <a href="url">Канал</a>. При пересылке
+    или копировании видимый текст может не содержать URL, но Telegram сохраняет
+    его в entities. Для LLM преобразуем его в обычный [Канал](url).
+    """
+    text = message.text or ""
+    entities = message.entities or []
+    result = text
+
+    for entity in sorted(entities, key=lambda item: item.offset, reverse=True):
+        entity_type = getattr(entity.type, "value", entity.type)
+        if entity_type != "text_link" or not entity.url:
+            continue
+        start = _utf16_offset_to_index(text, entity.offset)
+        end = _utf16_offset_to_index(text, entity.offset + entity.length)
+        label = _escape_markdown_link_label(text[start:end])
+        url = entity.url.replace("(", "%28").replace(")", "%29")
+        result = result[:start] + f"[{label}]({url})" + result[end:]
+    return result
 
 
 def parse_number(text: str) -> float | None:
@@ -352,6 +402,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     await message.answer(
         "Привет! Помогу подготовить аналитику по прошедшему проекту.\n\n"
         "*Собрать отчёт* — /sumup\n"
+        "*Собрать пост для внешних коллег* — /forexternal\n"
         "*Обновить охваты в таблице* — /update\n"
         "*Собрать карточку из текста* — /picture\n\n"
         "Поддерживаю: VK, Telegram, Instagram, YouTube, TikTok, Twitter/X",
@@ -369,6 +420,105 @@ async def cmd_sumup(message: Message, state: FSMContext) -> None:
         parse_mode="Markdown",
     )
     await state.set_state(ReportStates.waiting_csv_or_links)
+
+
+@dp.message(Command("forexternal"))
+async def cmd_forexternal(message: Message, state: FSMContext) -> None:
+    """Принимает внутренний /sumup и превращает его в пост для рабочего чата."""
+    await state.clear()
+    await message.answer(
+        "Пришли внутренний отчёт из /sumup.\n\n"
+        "Если Telegram разбил его на несколько сообщений, отправляй все части подряд. "
+        "Когда закончишь, напиши «готово» или /готово.\n\n"
+        "После каждой части подтвержу, что сохранил её. Отменить — /cancel.",
+        parse_mode=None,
+    )
+    await state.set_state(ExternalStates.waiting_report_parts)
+
+
+@dp.message(ExternalStates.waiting_report_parts, F.text)
+async def got_external_report_part(message: Message, state: FSMContext) -> None:
+    """Добавляет очередную часть внутреннего отчёта в буфер или запускает генерацию."""
+    raw_text = (message.text or "").strip()
+    command = raw_text.casefold().lstrip("/")
+
+    if command == "cancel":
+        await state.clear()
+        await message.answer("Сброшено. Напиши /forexternal, чтобы начать заново.", parse_mode=None)
+        return
+
+    if command in {"готово", "done"}:
+        data = await state.get_data()
+        parts = data.get("external_report_parts", [])
+        if not parts:
+            await message.answer(
+                "Пока нет ни одной части отчёта. Сначала пришли текст, затем напиши «готово».",
+                parse_mode=None,
+            )
+            return
+
+        report = "\n\n".join(parts)
+        await message.answer("Собираю пост для внешнего чата...", parse_mode=None)
+        try:
+            from src.analyzer.external_analyzer import generate_external_post
+            external_post = await generate_external_post(report)
+        except Exception as e:
+            # Не очищаем state: пользователь может повторить «готово» без копирования частей заново.
+            logger.error("External post generation failed: %s", e, exc_info=True)
+            await message.answer(
+                f"Не удалось собрать пост: {type(e).__name__}. "
+                "Текст отчёта сохранён, попробуй ещё раз написать «готово».",
+                parse_mode=None,
+            )
+            return
+
+        await state.clear()
+        # Модель получает и возвращает Telegram Markdown по ТЗ. Если разметка
+        # неожиданно невалидна, fallback ниже всё равно отдаст читаемый текст.
+        try:
+            await message.answer(external_post, parse_mode="Markdown")
+        except Exception as e:
+            logger.warning("External post Markdown render failed, sending plain text: %s", e)
+            await message.answer(external_post, parse_mode=None)
+        return
+
+    if raw_text.startswith("/"):
+        await message.answer(
+            "Жду часть отчёта или слово «готово». Для отмены используй /cancel.",
+            parse_mode=None,
+        )
+        return
+
+    part = message_to_external_markdown(message)
+    data = await state.get_data()
+    parts = data.get("external_report_parts", [])
+    current_chars = sum(len(item) for item in parts)
+    # Лимит совпадает с защитой в external_analyzer: не сохраняем заведомо
+    # неиспользуемый объём и не теряем уже накопленный буфер.
+    if current_chars + len(part) > 50_000:
+        await message.answer(
+            "Эта часть превысит лимит в 50 000 символов. Укороти отчёт или "
+            "начни новый сценарий через /forexternal.",
+            parse_mode=None,
+        )
+        return
+
+    parts.append(part)
+    await state.update_data(external_report_parts=parts)
+    await message.answer(
+        f"Принял часть {len(parts)}. Сейчас в буфере {current_chars + len(part):,} символов. "
+        "Жду следующую часть или слово «готово».",
+        parse_mode=None,
+    )
+
+
+@dp.message(ExternalStates.waiting_report_parts)
+async def external_report_wrong_input(message: Message, state: FSMContext) -> None:
+    await message.answer(
+        "Жду текстовую часть отчёта. Когда всё отправишь, напиши «готово». "
+        "Отменить — /cancel.",
+        parse_mode=None,
+    )
 
 
 # ШАГ 0а — получили CSV медиаплана
@@ -1074,6 +1224,7 @@ async def _set_bot_commands() -> None:
     from aiogram.types import BotCommand
     await bot.set_my_commands([
         BotCommand(command="sumup",   description="Собрать отчёт по прошедшему проекту"),
+        BotCommand(command="forexternal", description="Собрать пост для внешних коллег"),
         BotCommand(command="update",  description="Обновить фактические охваты в МП"),
         BotCommand(command="picture", description="Собрать брендовую карточку из текста"),
         BotCommand(command="help",    description="Помощь / список команд"),
