@@ -40,6 +40,14 @@ class ExternalAnalyzerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(word_count(result), 130)
 
     @patch("src.analyzer.external_analyzer.client.chat.completions.create", new_callable=AsyncMock)
+    async def test_does_not_trim_long_post_with_required_link_lists(self, create):
+        post = " ".join(["публикация"] * 300)
+        create.return_value = response(post)
+        result = await generate_external_post("Внутренний отчёт с фактами")
+        self.assertEqual(result, post)
+        self.assertEqual(create.await_count, 1)
+
+    @patch("src.analyzer.external_analyzer.client.chat.completions.create", new_callable=AsyncMock)
     async def test_corrects_post_when_word_count_is_outside_range(self, create):
         short = " ".join(["коротко"] * 10)
         corrected = " ".join(["исправлено"] * 125)
