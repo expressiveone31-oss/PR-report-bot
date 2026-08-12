@@ -67,6 +67,7 @@ class PictureStates(StatesGroup):
 
 class ExternalStates(StatesGroup):
     """FSM /forexternal: принимаем полный внутренний отчёт частями."""
+    waiting_project_description = State()
     waiting_report_parts = State()
 
 
@@ -427,7 +428,28 @@ async def cmd_forexternal(message: Message, state: FSMContext) -> None:
     """Принимает внутренний /sumup и превращает его в пост для рабочего чата."""
     await state.clear()
     await message.answer(
-        "Пришли внутренний отчёт из /sumup.\n\n"
+        "Коротко опиши проект своими словами: что продвигали, на какую аудиторию "
+        "работали и какой был подход. Этот текст станет первым абзацем внешнего поста.\n\n"
+        "Отменить — /cancel.",
+        parse_mode=None,
+    )
+    await state.set_state(ExternalStates.waiting_project_description)
+
+
+@dp.message(ExternalStates.waiting_project_description, F.text)
+async def got_external_project_description(message: Message, state: FSMContext) -> None:
+    description = (message.text or "").strip()
+    if description.casefold().lstrip("/") == "cancel":
+        await state.clear()
+        await message.answer("Сброшено. Напиши /forexternal, чтобы начать заново.", parse_mode=None)
+        return
+    if not description or description.startswith("/"):
+        await message.answer("Пришли короткое описание проекта или /cancel.", parse_mode=None)
+        return
+
+    await state.update_data(external_project_description=description)
+    await message.answer(
+        "Теперь пришли внутренний отчёт из /sumup.\n\n"
         "Если Telegram разбил его на несколько сообщений, отправляй все части подряд. "
         "Когда закончишь, напиши «готово» или /готово.\n\n"
         "После каждой части подтвержу, что сохранил её. Отменить — /cancel.",
@@ -458,10 +480,11 @@ async def got_external_report_part(message: Message, state: FSMContext) -> None:
             return
 
         report = "\n\n".join(parts)
+        project_description = data.get("external_project_description", "")
         await message.answer("Собираю пост для внешнего чата...", parse_mode=None)
         try:
             from src.analyzer.external_analyzer import generate_external_post
-            external_post = await generate_external_post(report)
+            external_post = await generate_external_post(report, project_description)
         except Exception as e:
             # Не очищаем state: пользователь может повторить «готово» без копирования частей заново.
             logger.error("External post generation failed: %s", e, exc_info=True)

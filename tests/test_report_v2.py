@@ -134,10 +134,11 @@ class ReportV2Tests(unittest.IsolatedAsyncioTestCase):
             "СВЕРХРЕЗУЛЬТАТЫ",
             "АНАЛИТИКА ПО ЛАЙКАМ, КОММЕНТАРИЯМ И РЕПОСТАМ",
             "О ЧЁМ ПИСАЛИ В КОММЕНТАРИЯХ",
+            "ВСЕ ПУБЛИКАЦИИ",
+            "ОРГАНИКА",
         ):
             self.assertIn(heading, text)
         self.assertNotIn("PAID-ПОСТЫ", text)
-        self.assertNotIn("<b>ОРГАНИКА</b>", text)
         self.assertNotIn("Итого органика:", text)
         self.assertNotIn("АНАЛИТИКА ВОВЛЕЧЁННОСТИ", text)
         self.assertIn("Контрольный итог в МП: 230", text)
@@ -148,6 +149,8 @@ class ReportV2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Даты флайта: 1 июля — 3 июля", text)
         self.assertIn("Период посева: с 1 июля по 3 июля", text)
         self.assertIn("Первые органические публикации: 3 июля", text)
+        self.assertIn('• <a href="https://vk.com/wall-1_1">Твои мужики</a>', text)
+        self.assertIn('• <a href="https://t.me/a/1">Органический канал</a>', text)
 
     @patch("src.analyzer.openai_analyzer._analyze_comments", new_callable=AsyncMock)
     @patch("src.analyzer.report_v2._brief_summary", new_callable=AsyncMock)
@@ -163,6 +166,8 @@ class ReportV2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<b>О ЧЁМ ПИСАЛИ В КОММЕНТАРИЯХ</b>", text)
         self.assertIn("Комментарии проанализированы по 1 публикации из 1", text)
         self.assertIn("обсуждали конкретную сцену и героя", text)
+        self.assertIn("<b>ВСЕ ПУБЛИКАЦИИ</b>", text)
+        self.assertNotIn("<b>ОРГАНИКА</b>", text)
 
     @patch("src.analyzer.openai_analyzer._analyze_comments", new_callable=AsyncMock)
     @patch("src.analyzer.report_v2._brief_summary", new_callable=AsyncMock)

@@ -76,7 +76,11 @@ class SumupV2IntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(posts_data[2]["fact_source"], "API")
         self.assertIn("ОБЩИЕ РЕЗУЛЬТАТЫ", text)
         self.assertIn("Фактический paid-охват: 190", text)
-        self.assertNotIn("<b>ОРГАНИКА</b>", text)
+        self.assertIn("<b>ВСЕ ПУБЛИКАЦИИ</b>", text)
+        self.assertIn("<b>ОРГАНИКА</b>", text)
+        self.assertIn('• <a href="https://vk.com/wall-1_1">Канал A</a>', text)
+        self.assertIn('• <a href="https://t.me/b/1">Канал B</a>', text)
+        self.assertIn('• <a href="https://vk.com/wall-3_3">Органика C</a>', text)
         self.assertNotIn("Итого органика:", text)
         self.assertIn("Органический охват: 50 просмотров", text)
         self.assertNotIn("Контрольный итог в МП", text)  # контроль совпал

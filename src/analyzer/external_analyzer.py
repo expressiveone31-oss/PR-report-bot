@@ -1,6 +1,7 @@
 """Генерация короткого поста для внешнего рабочего чата из /sumup."""
 
 import logging
+import re
 
 from openai import AsyncOpenAI
 
@@ -9,73 +10,113 @@ from src.config import OPENAI_API_KEY, OPENAI_MODEL
 logger = logging.getLogger(__name__)
 
 MAX_REPORT_CHARS = 50_000
-MIN_WORDS = 120
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-SYSTEM_PROMPT = """Ты — редактор, который превращает внутренний отчёт по посевной
-или PR-кампании в короткий пост для рабочего чата: такой, который дочитают за
-20 секунд и захотят переслать.
+SYSTEM_PROMPT = """Ты превращаешь внутренний отчёт о посеве в формальный пост для
+внешнего рабочего чата. Тебе переданы ручное описание проекта и внутренний отчёт.
 
-ВХОДНЫЕ ДАННЫЕ
-Тебе передан структурированный внутренний отчёт: общие результаты, paid- и
-organic-публикации, хронология, сверхрезультаты, аналитика вовлечённости,
-комментарии.
+Используй только факты, числа, названия и ссылки из входных данных. Не добавляй
+причин, оценок, механик кампании или названий тайтлов от себя. Не используй эмодзи,
+метафоры, крючки, разговорные слова и оценочные формулировки.
 
-ЖЁСТКОЕ ПРАВИЛО ПО ФАКТАМ
-Используй только цифры, названия каналов, ссылки и даты из входного текста.
-Ничего не досочиняй и не округляй цифры в пользу кампании. Если данных нет —
-пропусти элемент. Никогда не придумывай ссылку или название канала.
+СТРУКТУРА ОБЯЗАТЕЛЬНА:
+1. Первым абзацем поставь ручное описание проекта почти дословно. Исправь только
+   очевидные опечатки и лишние пробелы.
+2. Отдельным абзацем: плановый paid-охват, фактический paid-охват и перевыполнение
+   плана. При 178% выполнения пиши «превысили план на 78%», а не «на 178%».
+3. Укажи 1–3 самых сильных paid-результата с названиями, ссылками, фактом и планом.
+4. Добавь одну деталь вовлечённости только если в отчёте есть точное сравнение с
+   обычными показателями канала. Иначе пропусти этот абзац.
+5. Укажи фактический CPV и плановый CPV, если оба есть.
+6. В конце добавь «Все вышедшие публикации:» и ВСЕ paid-ссылки из раздела
+   «ВСЕ ПУБЛИКАЦИИ». Если есть раздел «ОРГАНИКА», добавь «Органические публикации:»
+   со ВСЕМИ organic-ссылками.
 
-ЗАДАЧА
-1. Найди одного героя: главную цифру или момент кампании. Всё остальное —
-поддерживающие детали, а не равноправный список.
-2. Начни с заголовка-крючка: конкретный факт или инсайт, энергично и просто.
-Не «Отчёт по проекту» и не метафора. Пример хорошего крючка:
-«Перевыполнили план почти в 2 раза». Допустим один эмодзи в начале.
-3. Если есть даты, выстрой движение: как началось, когда пошла органика,
-чем закончилось. Не выдумывай даты.
-4. Каждый канал в истории оформляй как [Название](ссылка), а не голым URL.
-Выбери 2–4 ярких момента. Органику, если она сильная, можно подать каскадом
-из 3–5 примеров.
-5. Если в комментариях есть яркая реакция аудитории, вплети её пересказом в
-историю. Не цитируй дословно и не делай отдельный технический блок.
-6. Заверши кульминацией: общий факт против плана и/или экономия одним сильным
-фактом. Общий охват не ставь в лид.
-
-ПОЗИТИВНЫЙ ФОКУС
-Подсвечивай сильные результаты. Не упоминай нулевую органику, отсутствующие
-данные, слабые посты или невыполнение плана по отдельному каналу. Это не
-разрешает менять факты: просто не включай слабый элемент в повествование.
-
-ОБЯЗАТЕЛЬНЫЕ ЭЛЕМЕНТЫ
-- В истории должно быть прямое сравнение общего план/факт цифрами, например:
-«1 252 022 просмотра при плане 705 000».
-- В конце после истории добавь блок «Все вышедшие публикации:» со ссылками на
-ВСЕ paid-публикации, которые есть во входных данных. Формат: «• [Канал](ссылка)».
-- Если во входе есть organic-публикации со ссылками и ненулевым охватом,
-добавь вторым блоком «Органические публикации:» со ВСЕМИ такими ссылками.
-- Если полного списка публикаций или ссылок во входе нет, не выдумывай его:
-выведи только доступные ссылки.
-
-СТИЛЬ И ФОРМАТ
-- Telegram legacy Markdown: *жирный* для ключевых цифр, [текст](ссылка) для каналов.
-- Спокойное естественное повествование, как коллеге за кофе.
-- Без сложных метафор и вычурных оборотов: не «уехали без оглядки», не
-«не сбавляли оборотов», не «это уже не совпадение».
-- 2–4 эмодзи на весь пост, не в каждой строке.
-- История до ссылочных блоков — 120–250 слов. Ссылочные списки в конце в этот
-лимит не входят: они обязательны для полноты и могут сделать общий текст длиннее.
-- Обычные абзацы, без H1/H2, без «как видно из таблицы» и без пояснений от себя.
-
-На выходе дай только готовый пост."""
+Telegram legacy Markdown: ссылки только в виде [Название](ссылка), жирный шрифт —
+только *так*. Верни только готовый пост."""
 
 
 def word_count(text: str) -> int:
     return len([word for word in text.split() if word])
 
 
-async def generate_external_post(internal_report: str) -> str:
+def _report_value(report: str, label: str) -> str:
+    match = re.search(rf"^{re.escape(label)}:\s*(.+)$", report, flags=re.MULTILINE)
+    return match.group(1).strip() if match else ""
+
+
+def _report_section(report: str, heading: str) -> list[str]:
+    match = re.search(
+        rf"(?:^|\n)\s*{re.escape(heading)}\s*\n+(.*?)(?=\n\s*[А-ЯЁ][А-ЯЁ\s-]{{3,}}\s*\n|\Z)",
+        report,
+        flags=re.DOTALL,
+    )
+    if not match:
+        return []
+    return [line.strip() for line in match.group(1).splitlines() if line.strip().startswith("•")]
+
+
+def _report_section_lines(report: str, heading: str) -> list[str]:
+    match = re.search(
+        rf"(?:^|\n)\s*{re.escape(heading)}\s*\n+(.*?)(?=\n\s*[А-ЯЁ][А-ЯЁ\s-]{{3,}}\s*\n|\Z)",
+        report,
+        flags=re.DOTALL,
+    )
+    if not match:
+        return []
+    return [line.strip() for line in match.group(1).splitlines() if line.strip()]
+
+
+def _fallback_external_post(report: str, project_description: str) -> str:
+    """Собирает фактический пост, когда OpenAI временно недоступен."""
+    project = _report_value(report, "Проект") or "проекта"
+    paid_plan = _report_value(report, "Плановый paid-охват")
+    paid_actual = _report_value(report, "Фактический paid-охват")
+    completion = _report_value(report, "Выполнение paid-плана")
+    actual_cpv = _report_value(report, "Фактический CPV с учётом органики")
+    planned_cpv = _report_value(report, "Плановый CPV")
+
+    lines = [project_description.strip() or f"Результаты посева по {project}."]
+    if paid_plan and paid_actual:
+        lines.extend(["", f"Вместо {paid_plan} просмотров получили {paid_actual}."])
+    if completion:
+        match = re.search(r"(-?\d+(?:[,.]\d+)?)%", completion)
+        if match:
+            overperformance = float(match.group(1).replace(",", ".")) - 100
+            if overperformance >= 0:
+                lines.append(f"Превысили план на {overperformance:.0f}%.")
+            else:
+                lines.append(f"Выполнение плана составило {completion}.")
+
+    strong_results = [
+        line for line in _report_section_lines(report, "СВЕРХРЕЗУЛЬТАТЫ")
+        if "при плане" in line.casefold()
+    ][:3]
+    if strong_results:
+        first_name, separator, first_result = strong_results[0].partition(" — ")
+        if separator:
+            lines.extend(["", f"Больше всего просмотров принесла публикация у {first_name}: {first_result}."])
+        if len(strong_results) > 1:
+            lines.extend(["", "Также выше плана отработали:"])
+            lines.extend(f"• {line}" for line in strong_results[1:])
+
+    if actual_cpv:
+        cpv_line = f"Фактический CPV: {actual_cpv}"
+        if planned_cpv:
+            cpv_line += f" при плановом {planned_cpv}"
+        lines.extend(["", cpv_line + "."])
+
+    paid_links = _report_section(report, "ВСЕ ПУБЛИКАЦИИ")
+    organic_links = _report_section(report, "ОРГАНИКА")
+    if paid_links:
+        lines.extend(["", "Все вышедшие публикации:", *paid_links])
+    if organic_links:
+        lines.extend(["", "Органические публикации:", *organic_links])
+    return "\n".join(lines)
+
+
+async def generate_external_post(internal_report: str, project_description: str = "") -> str:
     """Возвращает Telegram Markdown-пост из полного внутреннего отчёта."""
     internal_report = (internal_report or "").strip()
     if not internal_report:
@@ -87,48 +128,28 @@ async def generate_external_post(internal_report: str) -> str:
         )
 
     logger.info("Generating external post: input_chars=%s model=%s", len(internal_report), OPENAI_MODEL)
-    response = await client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": internal_report},
-        ],
-        temperature=0.55,
-        timeout=90,
-    )
+    try:
+        response = await client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"РУЧНОЕ ОПИСАНИЕ ПРОЕКТА:\n{project_description.strip()}\n\n"
+                    f"ВНУТРЕННИЙ ОТЧЁТ:\n{internal_report}"
+                ),
+            },
+            ],
+            temperature=0.55,
+            timeout=90,
+        )
+    except Exception as exc:
+        logger.warning("External post generation failed, using deterministic fallback: %s", exc)
+        return _fallback_external_post(internal_report, project_description)
     result = (response.choices[0].message.content or "").strip()
     if not result:
         raise ValueError("OpenAI вернул пустой пост")
 
-    count = word_count(result)
-    # Лимит 250 относится к самой истории. В общем числе слов могут быть
-    # обязательные списки всех ссылок, поэтому длинный валидный результат не
-    # сокращаем и не рискуем потерять публикации.
-    if count >= MIN_WORDS:
-        logger.info("External post generated: words=%s", count)
-        return result
-
-    # Один корректирующий запрос, только если сама история явно слишком короткая.
-    logger.info("External post needs length correction: words=%s", count)
-    correction = await client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    "Дополни повествовательную часть этого поста минимум до 120 слов, "
-                    "не меняя ни одного факта, числа, даты, названия или ссылки. "
-                    "Не удаляй обязательные ссылочные списки в конце. Верни только "
-                    "исправленный Telegram Markdown-пост.\n\n" + result
-                ),
-            },
-        ],
-        temperature=0.2,
-        timeout=60,
-    )
-    corrected = (correction.choices[0].message.content or "").strip()
-    if not corrected:
-        raise ValueError("OpenAI вернул пустой пост после коррекции длины")
-    logger.info("External post corrected: words=%s", word_count(corrected))
-    return corrected
+    logger.info("External post generated: words=%s", word_count(result))
+    return result

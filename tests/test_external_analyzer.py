@@ -48,13 +48,45 @@ class ExternalAnalyzerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(create.await_count, 1)
 
     @patch("src.analyzer.external_analyzer.client.chat.completions.create", new_callable=AsyncMock)
-    async def test_corrects_post_when_word_count_is_outside_range(self, create):
+    async def test_returns_short_formal_post_without_expansion(self, create):
         short = " ".join(["коротко"] * 10)
-        corrected = " ".join(["исправлено"] * 125)
-        create.side_effect = [response(short), response(corrected)]
+        create.return_value = response(short)
         result = await generate_external_post("Внутренний отчёт с фактами")
-        self.assertEqual(result, corrected)
-        self.assertEqual(create.await_count, 2)
+        self.assertEqual(result, short)
+        self.assertEqual(create.await_count, 1)
+
+    @patch("src.analyzer.external_analyzer.client.chat.completions.create", new_callable=AsyncMock)
+    async def test_uses_fact_based_fallback_when_openai_is_unavailable(self, create):
+        create.side_effect = ConnectionError("Connection error")
+        report = """Проект: Тест
+Плановый paid-охват: 100
+Фактический paid-охват: 150
+Общий охват с органикой: 180
+Выполнение paid-плана: 150%
+Органический охват: 30 просмотров
+Фактический CPV с учётом органики: 1,00 ₽
+
+СВЕРХРЕЗУЛЬТАТЫ
+
+[Paid](https://example.com/paid) — 150 просмотров при плане 100 (1,5× плана)
+
+ВСЕ ПУБЛИКАЦИИ
+
+• [Paid](https://example.com/paid)
+
+ОРГАНИКА
+
+• [Organic](https://example.com/organic)
+"""
+
+        result = await generate_external_post(report, "Продвигали аниме в развлекательных каналах.")
+
+        self.assertTrue(result.startswith("Продвигали аниме в развлекательных каналах."))
+        self.assertIn("Вместо 100 просмотров получили 150.", result)
+        self.assertIn("Превысили план на 50%.", result)
+        self.assertIn("Больше всего просмотров принесла публикация у [Paid](https://example.com/paid)", result)
+        self.assertIn("Все вышедшие публикации:\n• [Paid](https://example.com/paid)", result)
+        self.assertIn("Органические публикации:\n• [Organic](https://example.com/organic)", result)
 
 
 if __name__ == "__main__":

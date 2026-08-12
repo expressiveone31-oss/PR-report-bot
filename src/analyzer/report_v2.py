@@ -163,6 +163,10 @@ def _post_link(post: dict) -> str:
     return f'<a href="{html.escape(url, quote=True)}">{name}</a>'
 
 
+def _publication_links(posts: list[dict]) -> list[str]:
+    return [f"• {_post_link(post)}" for post in posts]
+
+
 def resolve_fact_sources(posts_data: list[dict]) -> None:
     """API имеет приоритет, факт из МП используется как fallback."""
     for post in posts_data:
@@ -628,5 +632,16 @@ async def build_report_v2(
             )
         ),
         html.escape(comments_text) if comments_text else "Тексты комментариев для анализа не получены.",
+        "",
+        "<b>ВСЕ ПУБЛИКАЦИИ</b>",
+        "",
+        *_publication_links(paid),
     ])
+    if organic:
+        lines.extend([
+            "",
+            "<b>ОРГАНИКА</b>",
+            "",
+            *_publication_links(organic),
+        ])
     return "\n".join(lines), metrics
