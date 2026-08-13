@@ -328,6 +328,89 @@ async def got_xlsx_for_update(message: Message, state: FSMContext) -> None:
     await _process_update_bytes(message, state, raw_bytes, fname)
 
 
+GOOGLE_SHEETS_ID_RE = re.compile(r"docs\.google\.com/spreadsheets/d/([a-zA-Z0-9_-]+)")
+
+
+async def _try_update_live_google_sheet(
+    message: Message, state: FSMContext, url: str,
+) -> bool:
+    """Пробует обновить Google Sheets прямо в оригинале через service account.
+
+    Возвращает True если обновление прошло (пусть и с частичными ошибками
+    API площадок) — тогда вызывающий не должен идти в fallback.
+    False = не Google Sheets / нет доступа / ключ не задан → идём в fallback
+    (скачивание public export + локальная правка).
+    """
+    match = GOOGLE_SHEETS_ID_RE.search(url)
+    if not match:
+        return False
+
+    spreadsheet_id = match.group(1)
+
+    # Ленивый импорт, чтобы бот стартовал даже если Google-либы не установлены.
+    from src.parsers.google_sheets_client import (
+        SpreadsheetAccessError,
+        get_service_account_email,
+    )
+    from src.updater.google_sheets_updater import update_google_sheet
+
+    await message.answer(
+        "Google Sheets: пробую обновить прямо в исходной таблице. "
+        "Это может занять несколько минут...",
+        parse_mode=None,
+    )
+
+    try:
+        stats, changes = await update_google_sheet(spreadsheet_id, dry_run=False)
+    except SpreadsheetAccessError as e:
+        service_email = get_service_account_email() or "email сервисника"
+        if e.kind == "no_credentials":
+            # Ключ бота не задан → тихо возвращаем False, идёт fallback на public export.
+            logger.info("Google Sheets: no service account, falling back to public export")
+            return False
+        if e.kind == "forbidden":
+            await message.answer(
+                "Google Sheets найден, но у бота нет прав на запись.\n\n"
+                f"Поделись таблицей с этим email как «Редактор»:\n{service_email}\n\n"
+                "После этого пришли ссылку ещё раз.",
+                parse_mode=None,
+            )
+            await state.clear()
+            return True  # мы отреагировали → fallback не нужен
+        if e.kind == "not_found":
+            await message.answer(
+                "Таблица не найдена или бот её не видит. "
+                "Проверь ссылку и что таблица не удалена.",
+                parse_mode=None,
+            )
+            await state.clear()
+            return True
+        # Прочее — логируем и идём в fallback.
+        logger.warning(f"Google Sheets access error ({e.kind}): {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Google Sheets live update failed: {e}", exc_info=True)
+        await message.answer(
+            f"Ошибка при обновлении Google Sheets: {type(e).__name__}. "
+            f"Пробую скачать таблицу как файл.",
+            parse_mode=None,
+        )
+        return False
+
+    await state.clear()
+    await message.answer(
+        f"Готово! Обновил охваты в исходной Google-таблице.\n\n"
+        f"🟡 Жёлтый ({stats.updated}) — охват обновлён\n"
+        f"⚪️ Серый ({stats.kept}) — значение сохранено (API не дал ответа, "
+        f"не стал перезаписывать)\n"
+        f"🔴 Красный ({stats.empty_no_data}) — ячейка была пуста, данных нет\n"
+        f"🌸 Розовый ({stats.skipped_deleted}) — ручная пометка «удалён», не тронули",
+        parse_mode=None,
+    )
+    await message.answer(url, parse_mode=None)
+    return True
+
+
 @dp.message(UpdateStates.waiting_xlsx, F.text)
 async def got_url_for_update(message: Message, state: FSMContext) -> None:
     """Обработка ссылки на МП (Google Sheets, Яндекс.Диск, прямая xlsx/csv)."""
@@ -349,6 +432,11 @@ async def got_url_for_update(message: Message, state: FSMContext) -> None:
             "Или напиши /update чтобы начать заново.",
             parse_mode=None,
         )
+        return
+
+    # Приоритет: если Google Sheets и у бота есть доступ через сервисник —
+    # пишем прямо в исходную таблицу. Иначе — fallback на скачивание файла.
+    if await _try_update_live_google_sheet(message, state, text):
         return
 
     if not is_supported_url(text):

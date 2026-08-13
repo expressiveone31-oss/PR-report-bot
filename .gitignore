@@ -6,3 +6,9 @@ __pycache__/
 *.session
 *.session-journal
 export_*.csv
+
+# Секреты — никогда не коммитим
+.secrets/
+Google service key/
+*service_account*.json
+pr-report-bot-*.json

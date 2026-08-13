@@ -7,3 +7,5 @@ pyrogram==2.0.106
 TgCrypto
 openpyxl>=3.1.0
 cairosvg>=2.7.0
+gspread>=6.2.0
+google-auth>=2.30.0
