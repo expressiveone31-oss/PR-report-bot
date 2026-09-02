@@ -168,17 +168,34 @@ def _publication_links(posts: list[dict]) -> list[str]:
 
 
 def resolve_fact_sources(posts_data: list[dict]) -> None:
-    """API имеет приоритет, факт из МП используется как fallback."""
+    """API имеет приоритет, факт из МП используется как fallback.
+
+    Правила «API вернул валидное число»:
+    - views is None → API не дал ответа, fallback на МП;
+    - views == 0 при непустом mp_actual_reach → трактуем как «API молчит»
+      (частый кейс: Instagram/VK возвращают 0 когда пост недоступен или
+      квота ключа исчерпана). Берём число из МП.
+    - views == 0 и в МП тоже пусто → честно ставим 0 (реально 0 просмотров).
+    - views > 0 → используем API-значение как источник истины.
+    """
     for post in posts_data:
         stats = post.setdefault("stats", {})
         api_views = stats.get("views")
         mp_views = post.get("mp_actual_reach")
-        if api_views is not None:
+
+        api_valid = api_views is not None and api_views > 0
+        mp_valid = mp_views is not None and mp_views > 0
+
+        if api_valid:
             stats["views"] = int(api_views)
             post["fact_source"] = "API"
-        elif mp_views is not None:
+        elif mp_valid:
             stats["views"] = int(mp_views)
             post["fact_source"] = "МП"
+        elif api_views == 0:
+            # API вернул 0, в МП тоже пусто — честный ноль.
+            stats["views"] = 0
+            post["fact_source"] = "API"
         else:
             stats["views"] = None
             post["fact_source"] = "нет данных"

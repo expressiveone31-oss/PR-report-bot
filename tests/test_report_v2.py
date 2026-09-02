@@ -94,6 +94,44 @@ class ReportV2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(metrics.actual_cpv, 240 / 270)
         self.assertEqual(metrics.control_difference, 270 - 999)
 
+    def test_api_zero_does_not_overwrite_mp_reach(self):
+        """Регрессия: Instagram/VK часто возвращают views=0 при недоступном
+        посте или исчерпанной квоте. Раньше это затирало валидное значение
+        из МП (Летняя_распаковка: 1 222 312 → 40 018)."""
+        posts = [
+            # Три поста, где API вернул None или 0, но в МП стоят реальные охваты
+            post("ПАБЛО РАДИНИ", "instagram", "https://instagram.com/p/1",
+                 views=None, mp_views=1_023_252, planned=80_000),
+            post("Маршрутизатор", "instagram", "https://instagram.com/p/2",
+                 views=0, mp_views=37_379, planned=10_000),
+            post("Лепра", "instagram", "https://instagram.com/reel/3",
+                 views=40_021, mp_views=40_011, planned=35_000),
+            post("Рифмы", "instagram", "https://instagram.com/p/4",
+                 views=0, mp_views=121_670, planned=35_000),
+        ]
+        resolve_fact_sources(posts)
+
+        self.assertEqual(posts[0]["fact_source"], "МП")
+        self.assertEqual(posts[0]["stats"]["views"], 1_023_252)
+        self.assertEqual(posts[1]["fact_source"], "МП")
+        self.assertEqual(posts[1]["stats"]["views"], 37_379)
+        self.assertEqual(posts[2]["fact_source"], "API")
+        self.assertEqual(posts[2]["stats"]["views"], 40_021)
+        self.assertEqual(posts[3]["fact_source"], "МП")
+        self.assertEqual(posts[3]["stats"]["views"], 121_670)
+
+        metrics = calculate_metrics(posts, planned_reach=160_000, placement_budget=282_642)
+        # Ожидаем: 1_023_252 + 37_379 + 40_021 + 121_670 = 1_222_322 (не 40_018!)
+        self.assertEqual(metrics.paid_actual, 1_222_322)
+
+    def test_api_zero_and_no_mp_gives_honest_zero(self):
+        """Если API вернул 0 и в МП тоже пусто — оставляем 0, это честный
+        результат (пост реально без просмотров)."""
+        item = post("Пусто", "vk", "https://vk.com/wall1", views=0, mp_views=None)
+        resolve_fact_sources([item])
+        self.assertEqual(item["fact_source"], "API")
+        self.assertEqual(item["stats"]["views"], 0)
+
     @patch("src.analyzer.report_v2._brief_summary", new_callable=AsyncMock)
     async def test_report_contains_v2_sections_and_control_difference(self, summary):
         summary.return_value = "Короткий вывод по фактам."
