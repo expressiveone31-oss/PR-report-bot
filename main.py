@@ -61,8 +61,13 @@ class UpdateStates(StatesGroup):
 
 class PictureStates(StatesGroup):
     """FSM для команды /picture — генерация карточки из свободного текста."""
-    waiting_text    = State()   # шаг 1: ждём текст с данными
-    waiting_confirm = State()   # шаг 2: показали превью, ждём подтверждения
+    waiting_template = State()  # шаг 0: выбор шаблона (Кинопоиск / Яндекс Музыка)
+    waiting_text     = State()  # шаг 1: ждём текст с данными
+    waiting_confirm  = State()  # шаг 2: показали превью, ждём подтверждения
+
+
+PICTURE_TEMPLATE_KINOPOISK = "kinopoisk"
+PICTURE_TEMPLATE_MUSIC = "music"
 
 
 class ExternalStates(StatesGroup):
@@ -801,6 +806,23 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
 # КАРТОЧКА — /picture
 # ============================================================================
 
+def _picture_template_kb() -> InlineKeyboardMarkup:
+    """Выбор шаблона карточки."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="Кинопоиск",
+                callback_data=f"picture:template:{PICTURE_TEMPLATE_KINOPOISK}",
+            ),
+            InlineKeyboardButton(
+                text="Яндекс Музыка",
+                callback_data=f"picture:template:{PICTURE_TEMPLATE_MUSIC}",
+            ),
+        ],
+        [InlineKeyboardButton(text="✖️ Отмена", callback_data="picture:cancel")],
+    ])
+
+
 def _picture_confirm_kb() -> InlineKeyboardMarkup:
     """Inline-клавиатура для превью карточки: подтвердить / отменить."""
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -827,6 +849,22 @@ def _card_from_dict(d: dict):
     )
 
 
+def _music_cover_from_dict(d: dict):
+    """Восстанавливает YandexMusicCoverData из FSM-словаря."""
+    from src.card import YandexMusicCoverData, YandexMusicMetric
+    metrics = [YandexMusicMetric(**m) for m in (d.get("metrics") or [])]
+    return YandexMusicCoverData(
+        title_lines=list(d.get("title_lines") or []),
+        subtitle=d.get("subtitle", "") or "",
+        background=d.get("background", "blue") or "blue",
+        align=d.get("align", "center") or "center",
+        hero=d.get("hero", "") or "",
+        hero_label=d.get("hero_label", "") or "",
+        metrics=metrics,
+        highlight=d.get("highlight", "") or "",
+    )
+
+
 async def _clear_preview_keyboard(chat_id: int, message_id: int) -> None:
     """
     Снимает inline-клавиатуру со старого сообщения-превью.
@@ -848,57 +886,131 @@ async def cmd_picture(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
         "Ок, соберём карточку.\n\n"
-        "⚠️ Пока работает только для Кинопоиска — используется его брендинг "
-        "(чёрный фон, оранжевый акцент, лаймовая вспышка). Для других "
-        "проектов пока не подойдёт.\n\n"
-        "Скинь текст с данными: цифры, названия каналов/площадок, "
-        "заголовок проекта. Формат — любой. Можно кусок отчёта, "
-        "таблицу, буллиты — разберусь.\n\n"
-        "Пример:\n"
-        "Аниме на Кинопоиске — 142 327 просмотров, 57 публикаций.\n"
-        "ВКонтакте «Твои мужики» — 14 постов, 72 115.\n"
-        "X (Twitter) — 21 пост, 42 439.\n"
-        "Telegram — 19 постов, 19 075.\n\n"
-        "Отменить — /cancel",
+        "Выбери шаблон:",
+        reply_markup=_picture_template_kb(),
     )
+    await state.set_state(PictureStates.waiting_template)
+
+
+@dp.callback_query(PictureStates.waiting_template, F.data.startswith("picture:template:"))
+async def picture_choose_template(cb: CallbackQuery, state: FSMContext) -> None:
+    template = (cb.data or "").split(":")[-1]
+    if template not in {PICTURE_TEMPLATE_KINOPOISK, PICTURE_TEMPLATE_MUSIC}:
+        await cb.answer("Неизвестный шаблон", show_alert=True)
+        return
+
+    await state.update_data(picture_template=template)
+    if cb.message:
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+    if template == PICTURE_TEMPLATE_MUSIC:
+        prompt = (
+            "Шаблон: Яндекс Музыка.\n\n"
+            "Скинь текст с данными: заголовок проекта, общий охват, "
+            "paid/organic, хайлайты. Формат — любой. Можно кусок отчёта "
+            "или блок «Данные для карточки».\n\n"
+            "Подсказки по правкам потом: «синий/розовый/зелёный фон», "
+            "«слева» / «по центру», «заголовок: …».\n\n"
+            "Отменить — /cancel"
+        )
+    else:
+        prompt = (
+            "Шаблон: Кинопоиск.\n\n"
+            "Скинь текст с данными: цифры, названия каналов/площадок, "
+            "заголовок проекта. Формат — любой. Можно кусок отчёта, "
+            "таблицу, буллиты — разберусь.\n\n"
+            "Пример:\n"
+            "Аниме на Кинопоиске — 142 327 просмотров, 57 публикаций.\n"
+            "ВКонтакте «Твои мужики» — 14 постов, 72 115.\n"
+            "X (Twitter) — 21 пост, 42 439.\n"
+            "Telegram — 19 постов, 19 075.\n\n"
+            "Отменить — /cancel"
+        )
+
+    if cb.message:
+        await cb.message.answer(prompt, parse_mode=None)
     await state.set_state(PictureStates.waiting_text)
+    await cb.answer()
+
+
+@dp.callback_query(
+    PictureStates.waiting_template,
+    F.data == "picture:cancel",
+)
+@dp.callback_query(
+    PictureStates.waiting_confirm,
+    F.data == "picture:cancel",
+)
+async def picture_cancel(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if cb.message:
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await cb.message.answer("Отменено. Напиши /picture чтобы начать заново.")
+    await cb.answer()
+
+
+@dp.message(PictureStates.waiting_template)
+async def picture_template_wrong_input(message: Message, state: FSMContext) -> None:
+    await message.answer(
+        "Выбери шаблон кнопкой под сообщением, или /cancel.",
+        reply_markup=_picture_template_kb(),
+    )
 
 
 @dp.message(PictureStates.waiting_text, F.text)
 async def got_picture_text(message: Message, state: FSMContext) -> None:
     """
-    Получили текст. Прогоняем через ИИ, показываем превью с кнопками
-    подтвердить / отменить.
+    Получили текст. Собираем карточку по выбранному шаблону,
+    показываем превью с кнопками подтвердить / отменить.
     """
     text = (message.text or "").strip()
     if not text or text.startswith("/"):
-        # если пришла команда — не считаем это данными
         await message.answer("Скинь текст с данными для карточки, или /cancel чтобы выйти.")
         return
 
+    data = await state.get_data()
+    template = data.get("picture_template") or PICTURE_TEMPLATE_KINOPOISK
     await message.answer("Разбираю текст, готовлю превью...")
 
-    from src.card import compose_card_from_text, format_preview
-    try:
-        card = await compose_card_from_text(text)
-    except Exception as e:
-        logger.error(f"compose_card_from_text failed: {e}", exc_info=True)
-        card = None
-
-    if card is None:
-        await message.answer(
-            "Не удалось разобрать текст. Попробуй сформулировать иначе — "
-            "укажи хотя бы общее число, заголовок и разбивку по каналам."
-        )
-        return
-
-    preview = format_preview(card)
-
-    # Сохраняем разобранный card в state и просим подтверждение.
-    # CardData — dataclass, сериализуем в dict для FSM хранилища.
     from dataclasses import asdict
 
-    # parse_mode=None — превью содержит «», _, —, ★ и пр., что ломает Markdown
+    if template == PICTURE_TEMPLATE_MUSIC:
+        from src.card import compose_music_cover_from_text, format_music_cover_preview
+        try:
+            cover = await compose_music_cover_from_text(text)
+        except Exception as e:
+            logger.error(f"compose_music_cover_from_text failed: {e}", exc_info=True)
+            cover = None
+        if cover is None:
+            await message.answer(
+                "Не удалось разобрать текст для Яндекс Музыки. "
+                "Укажи хотя бы заголовок и цифры охвата."
+            )
+            return
+        preview = format_music_cover_preview(cover)
+        payload = {"card": asdict(cover), "picture_template": template}
+    else:
+        from src.card import compose_card_from_text, format_preview
+        try:
+            card = await compose_card_from_text(text)
+        except Exception as e:
+            logger.error(f"compose_card_from_text failed: {e}", exc_info=True)
+            card = None
+        if card is None:
+            await message.answer(
+                "Не удалось разобрать текст. Попробуй сформулировать иначе — "
+                "укажи хотя бы общее число, заголовок и разбивку по каналам."
+            )
+            return
+        preview = format_preview(card)
+        payload = {"card": asdict(card), "picture_template": template}
+
     try:
         sent = await message.answer(
             "Вот что понял:\n\n"
@@ -917,23 +1029,9 @@ async def got_picture_text(message: Message, state: FSMContext) -> None:
         await state.clear()
         return
 
-    await state.update_data(
-        card=asdict(card),
-        preview_message_id=sent.message_id,
-    )
+    payload["preview_message_id"] = sent.message_id
+    await state.update_data(**payload)
     await state.set_state(PictureStates.waiting_confirm)
-
-
-@dp.callback_query(PictureStates.waiting_confirm, F.data == "picture:cancel")
-async def picture_cancel(cb: CallbackQuery, state: FSMContext) -> None:
-    await state.clear()
-    if cb.message:
-        try:
-            await cb.message.edit_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-        await cb.message.answer("Отменено. Напиши /picture чтобы начать заново.")
-    await cb.answer()
 
 
 @dp.callback_query(PictureStates.waiting_confirm, F.data == "picture:confirm")
@@ -941,17 +1039,25 @@ async def picture_confirm(cb: CallbackQuery, state: FSMContext) -> None:
     """Пользователь подтвердил превью — рендерим и отправляем карточку."""
     data = await state.get_data()
     card_dict = data.get("card")
+    template = data.get("picture_template") or PICTURE_TEMPLATE_KINOPOISK
     if not card_dict:
         await cb.answer("Данные потеряны, попробуй /picture заново", show_alert=True)
         await state.clear()
         return
 
-    # Ретайпим CardData из FSM-словаря
-    from src.card import render_card
     try:
-        card = _card_from_dict(card_dict)
+        if template == PICTURE_TEMPLATE_MUSIC:
+            from src.card import render_music_cover
+            cover = _music_cover_from_dict(card_dict)
+            render = lambda: render_music_cover(cover, scale=1.0)
+            filename = "yandex_music_card.png"
+        else:
+            from src.card import render_card
+            card = _card_from_dict(card_dict)
+            render = lambda: render_card(card, scale=1.5)
+            filename = "card.png"
     except Exception as e:
-        logger.error(f"picture_confirm: failed to restore CardData: {e}", exc_info=True)
+        logger.error(f"picture_confirm: failed to restore card: {e}", exc_info=True)
         await cb.answer("Данные испорчены, попробуй /picture заново", show_alert=True)
         await state.clear()
         return
@@ -964,20 +1070,19 @@ async def picture_confirm(cb: CallbackQuery, state: FSMContext) -> None:
         await cb.message.answer("Рендерю карточку...")
 
     try:
-        png_bytes = render_card(card, scale=1.5)
+        png_bytes = render()
     except Exception as e:
         err_class = type(e).__name__
         err_msg = str(e)
-        logger.error(f"picture_confirm: render_card failed: {err_class}: {err_msg}", exc_info=True)
+        logger.error(f"picture_confirm: render failed: {err_class}: {err_msg}", exc_info=True)
         if cb.message:
-            # Пишем краткое сообщение + первую строку ошибки для быстрой диагностики
             short_msg = err_msg.split("\n")[0][:200]
             await cb.message.answer(
                 f"Не удалось нарисовать карточку.\n"
                 f"Тип: {err_class}\n"
                 f"Причина: {short_msg}\n\n"
-                f"Скорее всего на сервере не установлены системные библиотеки "
-                f"(cairo/pango/шрифты). Напиши админу — я передам детали в логи.",
+                f"Скорее всего на сервере не хватает cairo/pango/шрифтов "
+                f"или ассетов Яндекс Музыки. Напиши админу — детали в логах.",
                 parse_mode=None,
             )
         await state.clear()
@@ -985,7 +1090,7 @@ async def picture_confirm(cb: CallbackQuery, state: FSMContext) -> None:
         return
 
     if cb.message:
-        photo = BufferedInputFile(png_bytes, filename="card.png")
+        photo = BufferedInputFile(png_bytes, filename=filename)
         await cb.message.answer_photo(photo)
 
     await state.clear()
@@ -996,13 +1101,10 @@ async def picture_confirm(cb: CallbackQuery, state: FSMContext) -> None:
 async def got_picture_edits(message: Message, state: FSMContext) -> None:
     """
     Пользователь прислал текст в ответ на превью — трактуем как правки.
-    Прогоняем через ИИ (revise_card_from_text), при успехе — показываем
-    новое превью, старое лишаем кнопок. При неудаче — просим переформулировать,
-    ничего не меняем в state.
+    Кинопоиск: через ИИ. Яндекс Музыка: детерминированные правки
+    (фон / выравнивание / заголовок), без Redis.
     """
     text = (message.text or "").strip()
-    # Команды типа /cancel уже перехвачены выше в файле — сюда не долетают.
-    # Но если человек начал текст с '/' (например /picture) — вежливо отказываем.
     if not text or text.startswith("/"):
         await message.answer(
             "Не понял. Если хочешь начать заново — /cancel, потом /picture. "
@@ -1012,47 +1114,57 @@ async def got_picture_edits(message: Message, state: FSMContext) -> None:
 
     data = await state.get_data()
     card_dict = data.get("card")
+    template = data.get("picture_template") or PICTURE_TEMPLATE_KINOPOISK
     if not card_dict:
         await message.answer("Данные потеряны, начни заново — /picture")
         await state.clear()
         return
 
-    try:
-        current = _card_from_dict(card_dict)
-    except Exception as e:
-        logger.error(f"got_picture_edits: failed to restore CardData: {e}", exc_info=True)
-        await message.answer("Данные испорчены, начни заново — /picture")
-        await state.clear()
-        return
-
     await message.answer("Применяю правки...")
+    from dataclasses import asdict
 
-    from src.card import revise_card_from_text, format_preview
-    try:
-        revised = await revise_card_from_text(current, text)
-    except Exception as e:
-        logger.error(f"revise_card_from_text failed: {e}", exc_info=True)
-        revised = None
+    if template == PICTURE_TEMPLATE_MUSIC:
+        from src.card import revise_music_cover_from_text, format_music_cover_preview
+        try:
+            current = _music_cover_from_dict(card_dict)
+            revised = revise_music_cover_from_text(current, text)
+            preview_text = format_music_cover_preview(revised)
+            new_card = asdict(revised)
+        except Exception as e:
+            logger.error(f"revise_music_cover_from_text failed: {e}", exc_info=True)
+            await message.answer(
+                "Не понял правку. Для Музыки пиши, например: "
+                "«розовый фон», «слева», «заголовок: Новый тайтл». "
+                "Или /cancel чтобы выйти."
+            )
+            return
+    else:
+        from src.card import revise_card_from_text, format_preview
+        try:
+            current = _card_from_dict(card_dict)
+        except Exception as e:
+            logger.error(f"got_picture_edits: failed to restore CardData: {e}", exc_info=True)
+            await message.answer("Данные испорчены, начни заново — /picture")
+            await state.clear()
+            return
+        try:
+            revised = await revise_card_from_text(current, text)
+        except Exception as e:
+            logger.error(f"revise_card_from_text failed: {e}", exc_info=True)
+            revised = None
+        if revised is None:
+            await message.answer(
+                "Не понял правку. Попробуй сформулировать точнее — какое поле "
+                "меняем и на что. Или /cancel чтобы выйти."
+            )
+            return
+        preview_text = format_preview(revised)
+        new_card = asdict(revised)
 
-    if revised is None:
-        # Остаёмся в том же state, старая карточка нетронута, кнопки на
-        # последнем превью всё ещё живые — юзер может переформулировать
-        # или сгенерить существующее.
-        await message.answer(
-            "Не понял правку. Попробуй сформулировать точнее — какое поле "
-            "меняем и на что. Или /cancel чтобы выйти."
-        )
-        return
-
-    # Снимаем клавиатуру со СТАРОГО превью, чтобы юзер не жал на устаревшее.
     old_preview_id = data.get("preview_message_id")
     if old_preview_id:
         await _clear_preview_keyboard(message.chat.id, old_preview_id)
 
-    # Показываем новое превью и запоминаем его message_id.
-    # parse_mode=None — те же спецсимволы что и в первом превью.
-    from dataclasses import asdict
-    preview_text = format_preview(revised)
     try:
         sent = await message.answer(
             "Обновил. Проверь:\n\n"
@@ -1069,10 +1181,10 @@ async def got_picture_edits(message: Message, state: FSMContext) -> None:
             "Правка не применена, попробуй сформулировать иначе.",
             parse_mode=None,
         )
-        # Старая карточка в state остаётся — юзер может продолжать с ней
         return
     await state.update_data(
-        card=asdict(revised),
+        card=new_card,
+        picture_template=template,
         preview_message_id=sent.message_id,
     )
 

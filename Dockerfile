@@ -50,8 +50,13 @@ RUN pip install --no-cache-dir --upgrade pip \
 # --- Код проекта ----------------------------------------------------------
 COPY . .
 
-# Обновляем шрифтовый кеш чтобы DejaVu стал виден cairo/pango.
-RUN fc-cache -f
+# YS Music Poster / YS Text — для шаблона Яндекс Музыки (/picture).
+# Файлы кладутся в src/card/assets/yandex_music/fonts/; если их нет —
+# копирование no-op, Кинопоиск-карточка не страдает.
+RUN mkdir -p /usr/share/fonts/yandex-music \
+    && find src/card/assets/yandex_music/fonts -type f \( -name '*.ttf' -o -name '*.otf' \) \
+         -exec cp {} /usr/share/fonts/yandex-music/ \; 2>/dev/null || true \
+    && fc-cache -f
 
 # --- Запуск ---------------------------------------------------------------
 # Bot читает переменные окружения из .env локально и из Railway variables
