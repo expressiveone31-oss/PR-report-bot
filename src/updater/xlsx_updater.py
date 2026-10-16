@@ -101,69 +101,11 @@ def _find_col(headers: list[str], keywords: tuple,
 
 
 async def _get_views(url: str) -> tuple[Optional[int], str]:
-    """
-    Идёт в нужный API и возвращает (просмотры, статус).
-    Статус: "ok" | "deleted" | "error"
-    """
-    platform = _detect_platform(url)
-    try:
-        if platform == "vk":
-            from src.platforms.vk import get_post_stats
-            result = await get_post_stats(url)
-            if result.error:
-                return None, "error"
-            return result.views, "ok"
+    """Делегирует в общий get_views (изоляция TGStat, embed fallback, IG shortcode)."""
+    from src.updater.common import get_views
 
-        elif platform == "telegram":
-            from src.platforms import telemetr, tgstat
-            result = await telemetr.get_post_stats(url)
-            telemetr_views = result.views or 0
-            fallback = await tgstat.get_post_stats(url)
-            tgstat_views = fallback.views or 0
-
-            # Пост удалён: TGStat не находит, но Telemetr отдаёт кеш
-            post_deleted = fallback.error in ("post_not_found_in_channel", "post_not_found")
-            if post_deleted and telemetr_views > 0:
-                return telemetr_views, "deleted"
-            if post_deleted:
-                return None, "error"
-
-            if not fallback.error and tgstat_views > telemetr_views:
-                return tgstat_views, "ok"
-            return (telemetr_views, "ok") if telemetr_views > 0 else (None, "error")
-
-        elif platform == "instagram":
-            from src.platforms.hikerapi import get_post_stats
-            result = await get_post_stats(url)
-            if result.error:
-                return None, "error"
-            return result.views, "ok"
-
-        elif platform == "youtube":
-            from src.platforms.youtube import get_post_stats
-            result = await get_post_stats(url)
-            if result.error:
-                return None, "error"
-            return result.views, "ok"
-
-        elif platform == "tiktok":
-            from src.platforms.tiktok import get_post_stats
-            result = await get_post_stats(url)
-            if result.error:
-                return None, "error"
-            return result.views, "ok"
-
-        elif platform == "twitter":
-            from src.platforms.twitter import get_post_stats
-            result = await get_post_stats(url)
-            if result.error:
-                return None, "error"
-            return result.views, "ok"
-
-    except Exception as e:
-        logger.warning(f"API error for {url}: {e}")
-
-    return None, "error"
+    result = await get_views(url)
+    return result.as_tuple()
 
 
 async def update_xlsx(xlsx_bytes: bytes) -> tuple[bytes, dict]:

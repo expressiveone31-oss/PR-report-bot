@@ -77,10 +77,17 @@ async def _fetch_stats_for_post(post: Post) -> dict:
                 }
             logger.info(f"Telemetr done: views={result.views}, channel_title={result.channel_title}, avg_views={result.channel_avg.avg_views if result.channel_avg else None}, error={result.error}")
 
-            # TGStat перекрёстная проверка: запускаем параллельно с Telemetr и берём большее значение.
-            # Это защищает от случаев когда Telemetr занижает реальный охват.
+            # TGStat перекрёстная проверка. Без токена / при падении — не затираем Telemetr.
             logger.info(f"TGStat cross-check: fetching {post.post_url}")
-            fallback = await tgstat.get_post_stats(post.post_url)
+            try:
+                fallback = await tgstat.get_post_stats(post.post_url)
+            except Exception as e:
+                logger.warning(f"TGStat failed for {post.post_url}: {e}")
+                from src.platforms.tgstat import TGStatPostStats
+                fallback = TGStatPostStats(
+                    post_url=post.post_url,
+                    error=f"{type(e).__name__}: {e}",
+                )
             telemetr_views = result.views or 0
             tgstat_views = fallback.views or 0
 

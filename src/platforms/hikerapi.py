@@ -49,11 +49,22 @@ def _parse_instagram_url(url: str) -> Optional[str]:
     """
     Извлекает shortcode из ссылки Instagram.
     Поддерживает /p/, /reel/, /tv/.
+
+    Иногда в МП попадают битые share-URL вида
+    /reel/Dd_W9mZsDcJCF6qiyGywdNRgvuEWXw8SfNCpTg0/ — короткий код обычно 11 символов.
     """
     match = re.search(r"instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_-]+)", url)
-    if match:
-        return match.group(1)
-    return None
+    if not match:
+        return None
+    code = match.group(1)
+    # Нормальный shortcode Instagram ≈ 11 символов; длиннее — обрезаем.
+    if len(code) > 15:
+        logger.warning(
+            "Instagram shortcode suspiciously long (%d): %s → using first 11",
+            len(code), code,
+        )
+        return code[:11]
+    return code
 
 
 async def _get_user_id(session: aiohttp.ClientSession, headers: dict, username: str) -> Optional[int]:
