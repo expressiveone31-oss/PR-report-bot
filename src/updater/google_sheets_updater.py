@@ -353,10 +353,12 @@ async def update_google_sheet(
             cell_a1 = f"{col_letter}{row}"
             old_raw = grid[row - 1][col_reach] if col_reach < len(grid[row - 1]) else ""
             old_has_value = _has_numeric_value(str(old_raw) if old_raw is not None else "")
-            # API «дал число» — только если status ok и число > 0.
-            # 0 при существующем значении считаем мусором (частый случай VK-clip).
+            # Пишем число, если есть положительный охват.
+            # status=deleted тоже пишем: это кеш Telemetr, иначе ячейка залипает
+            # на старом значении (TGStat post_not_found на живом посте).
+            # 0 при существующем значении — мусор (частый случай VK-clip).
             api_has_value = (
-                api_status == "ok"
+                api_status in ("ok", "deleted")
                 and api_views is not None
                 and (api_views > 0 or not old_has_value)
             )

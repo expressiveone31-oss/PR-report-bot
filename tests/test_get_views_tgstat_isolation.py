@@ -53,6 +53,30 @@ class TgstatIsolationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.status, "ok")
             self.assertEqual(result.views, 999)
 
+    async def test_tgstat_post_not_found_does_not_drop_live_views(self):
+        """post_not_found на живом посте → status ok и число, не deleted."""
+        telemetr = TelemetrPostStats(
+            post_url="https://t.me/moscowmi/46116",
+            views=47648,
+        )
+        tgstat = TGStatPostStats(
+            post_url="https://t.me/moscowmi/46116",
+            error="post_not_found",
+        )
+        with patch(
+            "src.platforms.telemetr.get_post_stats",
+            new=AsyncMock(return_value=telemetr),
+        ), patch(
+            "src.platforms.tgstat.get_post_stats",
+            new=AsyncMock(return_value=tgstat),
+        ), patch(
+            "src.updater.common._telegram_embed_views",
+            new=AsyncMock(return_value=48800),
+        ):
+            result = await get_views("https://t.me/moscowmi/46116")
+            self.assertEqual(result.status, "ok")
+            self.assertEqual(result.views, 48800)
+
     async def test_tgstat_guard_returns_error_not_raise(self):
         with patch("src.platforms.tgstat.TGSTAT_TOKEN", None):
             from src.platforms import tgstat as tgstat_mod

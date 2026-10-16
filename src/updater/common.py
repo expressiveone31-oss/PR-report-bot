@@ -216,16 +216,23 @@ async def get_views(url: str) -> ViewsResult:
                 fallback = TGStatPostStats(post_url=url, error=f"{type(e).__name__}: {e}")
             tgstat_views = fallback.views or 0
 
-            post_deleted = fallback.error in (
+            # TGStat часто отвечает post_not_found на живой пост (квота / не в индексе).
+            # Это НЕ доказательство удаления: иначе статус "deleted" и Sheets
+            # не перезаписывает ячейку (пишет только status=ok) — факт залипает.
+            post_missing = fallback.error in (
                 "post_not_found_in_channel", "post_not_found",
             )
-            if post_deleted and telemetr_views > 0:
-                return ViewsResult(telemetr_views, "deleted", "пост удалён, взяли кеш Telemetr", platform)
-            if post_deleted and telemetr_views <= 0:
-                # Ещё раз проверим публичный embed — TGStat иногда врёт.
-                embed_views = await _telegram_embed_views(url)
-                if embed_views and embed_views > 0:
-                    return ViewsResult(embed_views, "ok", "t.me embed (TGStat said deleted)", platform)
+            if post_missing:
+                embed_views = await _telegram_embed_views(url) or 0
+                if embed_views > 0 or telemetr_views > 0:
+                    best = max(telemetr_views, embed_views)
+                    if embed_views > 0:
+                        source = "t.me embed" if embed_views >= telemetr_views else "Telemetr"
+                        return ViewsResult(best, "ok", source, platform)
+                    return ViewsResult(
+                        telemetr_views, "deleted",
+                        "пост не найден в embed, кеш Telemetr", platform,
+                    )
                 return ViewsResult(
                     None, "error",
                     _short_error(fallback.error or telemetr_err or "пост не найден"),

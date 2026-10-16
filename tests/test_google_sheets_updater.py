@@ -107,6 +107,19 @@ class UpdateMatrixTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats.updated, 1)
         self.assertEqual(changes[0].action, "updated")
 
+    async def test_updated_when_status_deleted_but_views_present(self):
+        """Кеш Telemetr (status=deleted) должен перезаписать залипшее значение."""
+        rows = [
+            ["", "", "", "", "", "", "", "Ссылка на публикацию", "Охват (факт)"],
+            ["", "", "", "", "", "", "", "https://t.me/ch/1", "3"],
+        ]
+        views_map = {2: (47648, "deleted")}
+        stats, changes, ws, sh = await self._run(rows, views_map)
+        self.assertEqual(stats.updated, 1)
+        self.assertEqual(changes[0].action, "updated")
+        payload = sh.values_batch_update.call_args.kwargs["body"]
+        self.assertEqual(payload["data"][0]["values"], [[47648]])
+
     async def test_kept_when_old_has_value_and_api_error(self):
         rows = [
             ["", "", "", "", "", "", "", "Ссылка на публикацию", "Охват (факт)"],
