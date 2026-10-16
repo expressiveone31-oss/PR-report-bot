@@ -17,10 +17,12 @@ BACKGROUNDS = {
     "pink": "bg-pink.png",
     "green": "bg-green.png",
 }
-YELLOW = "#FFFF00"
+# Бренд-токены из HANDOFF артдира («Распаковка»).
+YELLOW = "#FFFF1A"
 # YS-шрифты ставятся из assets в Docker; DejaVu — системный fallback.
 FONT_DISPLAY = "YS Music Poster, DejaVu Sans, sans-serif"
-FONT_SUB = "YS Text, DejaVu Sans, sans-serif"
+FONT_SUB = "YS Display, DejaVu Sans, sans-serif"
+FONT_BODY = "YS Text, DejaVu Sans, sans-serif"
 
 
 @dataclass
@@ -120,11 +122,11 @@ def build_music_cover_svg(data: YandexMusicCoverData) -> str:
             metric_parts.append(
                 f'<line x1="{mx}" y1="590" x2="{mx + metric_width - 22}" y2="590" '
                 f'stroke="{YELLOW}" stroke-opacity="0.55" stroke-width="2"/>'
-                f'<text x="{mx}" y="630" font-family="{FONT_SUB}" font-weight="700" font-size="20" '
+                f'<text x="{mx}" y="630" font-family="{FONT_BODY}" font-weight="700" font-size="20" '
                 f'fill="{YELLOW}" letter-spacing="1">{_escape(metric.name)}</text>'
                 f'<text x="{mx}" y="690" font-family="{FONT_SUB}" font-weight="700" font-size="{value_size}" '
                 f'fill="#FFFFFF">{_escape(metric.value)}</text>'
-                f'<text x="{mx}" y="725" font-family="{FONT_SUB}" font-weight="500" font-size="18" '
+                f'<text x="{mx}" y="725" font-family="{FONT_BODY}" font-weight="500" font-size="18" '
                 f'fill="{YELLOW}">{_escape(detail)}</text>'
             )
         metrics_svg = "".join(metric_parts)
@@ -132,9 +134,9 @@ def build_music_cover_svg(data: YandexMusicCoverData) -> str:
             highlight_svg = (
                 f'<line x1="{MARGIN}" y1="830" x2="{W - MARGIN}" y2="830" '
                 f'stroke="{YELLOW}" stroke-opacity="0.55" stroke-width="2"/>'
-                f'<text x="{MARGIN}" y="865" font-family="{FONT_SUB}" font-weight="700" font-size="21" '
+                f'<text x="{MARGIN}" y="865" font-family="{FONT_BODY}" font-weight="700" font-size="21" '
                 f'fill="{YELLOW}">ХАЙЛАЙТ ПОСЕВА</text>'
-                f'<text x="{MARGIN}" y="915" font-family="{FONT_SUB}" font-weight="500" font-size="26" '
+                f'<text x="{MARGIN}" y="915" font-family="{FONT_BODY}" font-weight="500" font-size="26" '
                 f'fill="#FFFFFF">{_escape(data.highlight)}</text>'
             )
 
