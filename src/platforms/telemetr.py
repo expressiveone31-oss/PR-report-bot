@@ -90,6 +90,9 @@ async def get_post_stats(post_url: str) -> TelemetrPostStats:
         )
 
     channel_id, post_id = parsed
+    if not TELEMETR_TOKEN:
+        return TelemetrPostStats(post_url=post_url, error="TELEMETR_TOKEN не задан")
+
     headers = {"Authorization": f"Bearer {TELEMETR_TOKEN}"}
 
     connector = aiohttp.TCPConnector(ssl=SSL_CONTEXT)

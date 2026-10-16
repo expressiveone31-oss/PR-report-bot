@@ -82,6 +82,11 @@ async def get_post_stats(post_url: str) -> TGStatPostStats:
         return TGStatPostStats(post_url=post_url,
                                error="Не удалось распарсить ссылку Telegram")
 
+    if not TGSTAT_TOKEN:
+        # Без токена aiohttp падает TypeError на params token=None —
+        # и в updater это затирало уже успешный ответ Telemetr.
+        return TGStatPostStats(post_url=post_url, error="TGSTAT_TOKEN не задан")
+
     channel, post_id = parsed
 
     async with aiohttp.ClientSession() as session:

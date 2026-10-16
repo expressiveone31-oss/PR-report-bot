@@ -31,9 +31,12 @@ from src.updater.common import (
     ORGANIC_MARKERS,
     POST_URL_KEYWORDS,
     REACH_FACT_KEYWORDS,
+    ViewsResult,
+    detect_platform,
     fetch_views_for_urls,
     find_col,
     is_post_url,
+    unpack_views_entry,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,6 +74,9 @@ class RowChange:
     old_value: str
     api_value: Optional[int]  # что вернул API площадки
     action: str       # "updated" | "kept" | "empty_no_data" | "deleted_marker"
+    platform: str = "unknown"
+    api_status: str = ""
+    detail: str = ""  # почему серый/красный — для ответа пользователю
 
 
 @dataclass
@@ -339,14 +345,20 @@ async def update_google_sheet(
         col_letter = _col_letter(col_reach)
 
         for row, url in url_rows:
-            api_views, api_status = views_map.get(row, (None, "error"))
+            entry = unpack_views_entry(
+                views_map.get(row, ViewsResult(None, "error", "нет ответа fetch", detect_platform(url)))
+            )
+            api_views = entry.views
+            api_status = entry.status
             cell_a1 = f"{col_letter}{row}"
             old_raw = grid[row - 1][col_reach] if col_reach < len(grid[row - 1]) else ""
-            old_has_value = _has_numeric_value(old_raw)
-            # API «дал число» — только если status ok и число > 0.
-            # 0 при существующем значении считаем мусором (частый случай VK-clip).
+            old_has_value = _has_numeric_value(str(old_raw) if old_raw is not None else "")
+            # Пишем число, если есть положительный охват.
+            # status=deleted тоже пишем: это кеш Telemetr, иначе ячейка залипает
+            # на старом значении (TGStat post_not_found на живом посте).
+            # 0 при существующем значении — мусор (частый случай VK-clip).
             api_has_value = (
-                api_status == "ok"
+                api_status in ("ok", "deleted")
                 and api_views is not None
                 and (api_views > 0 or not old_has_value)
             )
@@ -368,6 +380,10 @@ async def update_google_sheet(
                 action = "kept"
                 stats.kept += 1
                 format_requests.append({"range": cell_a1, "format": {"backgroundColor": COLOR_KEPT}})
+                logger.info(
+                    "gs updater: kept row %d [%s] status=%s views=%s detail=%s url=%s",
+                    row, entry.platform, api_status, api_views, entry.detail, url,
+                )
             else:
                 # Пусто и API молчит — красная заливка, ячейка остаётся пустой.
                 action = "empty_no_data"
@@ -379,9 +395,12 @@ async def update_google_sheet(
                 row=row,
                 col_a1=cell_a1,
                 url=url,
-                old_value=old_raw,
+                old_value=str(old_raw) if old_raw is not None else "",
                 api_value=api_views,
                 action=action,
+                platform=entry.platform or detect_platform(url),
+                api_status=api_status,
+                detail=entry.detail,
             ))
 
         if dry_run:
