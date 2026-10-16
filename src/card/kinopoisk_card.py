@@ -17,6 +17,8 @@ Kinopoisk report-card generator (Python port).
 
 import io
 import logging
+import os
+import sys
 from typing import Optional, Union
 from dataclasses import dataclass, field
 
@@ -275,6 +277,12 @@ def render_card(
     Raises:
         RuntimeError: если cairosvg / cairo недоступны в системе.
     """
+    if sys.platform == "darwin" and os.path.isdir("/opt/homebrew/lib"):
+        fallback_paths = os.environ.get("DYLD_FALLBACK_LIBRARY_PATH", "").split(":")
+        if "/opt/homebrew/lib" not in fallback_paths:
+            os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = ":".join(
+                path for path in ["/opt/homebrew/lib", *fallback_paths] if path
+            )
     try:
         import cairosvg  # ленивый импорт — чтобы не падать при import module
     except (ImportError, OSError) as e:

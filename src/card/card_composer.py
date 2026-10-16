@@ -15,11 +15,15 @@ Fallback: если OpenAI недоступен или вернул мусор �
 
 import json
 import logging
+import re
 from typing import Optional
 
 from src.card.kinopoisk_card import CardData, CardRow
+from src.card.yandex_music_cover import YandexMusicCoverData, YandexMusicMetric
 
 logger = logging.getLogger(__name__)
+
+CAMPAIGN_CARD_HEADER = "ДАННЫЕ ДЛЯ КАРТОЧКИ: ИТОГИ ПОСЕВА"
 
 
 # --- Форматирование чисел --------------------------------------------------
@@ -401,6 +405,15 @@ FREETEXT_SYSTEM_PROMPT = """Ты — редактор карточки для б
 6. Footer — короткая техническая строка. Пример: «Отчёт по проекту · охват
    фактический на момент выгрузки».
 
+ЕСЛИ В ТЕКСТЕ ЕСТЬ ИТОГИ КАМПАНИИ, а не разбивка по каналам:
+- hero — общий охват;
+- rows — paid-охват с планом, перевыполнение paid-плана, органический охват;
+- органический охват показывай только если он указан;
+- хайлайты добавляй только если они явно перечислены, максимум два;
+- не заменяй итоговые показатели топом каналов или публикаций.
+- для такой карточки используй breakdown_label «КЛЮЧЕВЫЕ ПОКАЗАТЕЛИ» и
+  reach_label «РЕЗУЛЬТАТ».
+
 ПРАВИЛА ФОРМАТА:
 - Числа в reach и hero — с пробелами через каждые 3 цифры: «142 327», «1 200 000».
 - title_lines: 1 или 2 элемента строкой, каждая до ~30 символов.
@@ -418,7 +431,9 @@ FREETEXT_SYSTEM_PROMPT = """Ты — редактор карточки для б
     {"name": "ВКонтакте — «Твои мужики»", "tag": "14 публикаций", "reach": "72 115", "highlight": true},
     {"name": "X (Twitter)", "tag": "21 публикация", "reach": "42 439", "highlight": false}
   ],
-  "footer": "Отчёт по проекту · охват фактический на момент выгрузки"
+  "footer": "Отчёт по проекту · охват фактический на момент выгрузки",
+  "breakdown_label": "РАЗБИВКА ПО ПЛОЩАДКАМ",
+  "reach_label": "ОХВАТ"
 }
 
 Не пиши ничего кроме JSON. Не оборачивай в ```json ...```. Только сырой JSON."""
@@ -439,6 +454,10 @@ async def compose_card_from_text(
     if not text:
         logger.info("compose_card_from_text: empty input")
         return None
+
+    campaign_card = _campaign_card_from_block(text)
+    if campaign_card is not None:
+        return campaign_card
 
     if openai_client is None:
         try:
@@ -498,6 +517,8 @@ async def compose_card_from_text(
             subtitle=str(parsed.get("subtitle", "") or ""),
             rows=rows,
             footer=str(parsed.get("footer", "") or ""),
+            breakdown_label=str(parsed.get("breakdown_label", "") or "РАЗБИВКА ПО ПЛОЩАДКАМ"),
+            reach_label=str(parsed.get("reach_label", "") or "ОХВАТ"),
         )
     except Exception as e:
         logger.warning(f"compose_card_from_text: bad JSON structure: {e}")
@@ -509,12 +530,259 @@ def _fix_publications_plural(tag: str) -> str:
     Если tag имеет вид «N публик...», приводит к правильному падежу.
     Иначе возвращает как есть.
     """
-    import re
     m = re.match(r"^\s*(\d+)\s+публик[а-яё]*\b(.*)$", tag, flags=re.IGNORECASE)
     if not m:
         return tag
     n = int(m.group(1))
     return _pubs_word(n) + m.group(2)
+
+
+def _campaign_card_from_block(text: str) -> Optional[CardData]:
+    if not text.startswith(CAMPAIGN_CARD_HEADER):
+        return None
+
+    values: dict[str, str] = {}
+    highlights: list[tuple[str, str, str]] = []
+    for line in text.splitlines()[1:]:
+        key, separator, value = line.partition(":")
+        if not separator:
+            continue
+        value = value.strip()
+        if key == "Хайлайт":
+            parts = [part.strip() for part in value.split("|")]
+            if len(parts) == 3:
+                highlights.append((parts[0], parts[1], parts[2]))
+            continue
+        values[key] = value
+
+    required = ("Общий охват", "Публикации", "Paid-охват", "Paid-план")
+    if any(not values.get(key) for key in required):
+        return None
+
+    project_name = values.get("Проект", "Без названия")
+    try:
+        total_posts = int(re.sub(r"\D", "", values["Публикации"]))
+    except ValueError:
+        return None
+
+    rows = [
+        CardRow("PAID-ОХВАТ", values["Paid-охват"], f"план {values['Paid-план']}", True),
+    ]
+    if values.get("Перевыполнение paid-плана"):
+        rows.append(CardRow(
+            "ПЕРЕВЫПОЛНЕНИЕ",
+            values["Перевыполнение paid-плана"],
+            "paid-плана",
+        ))
+    if values.get("Органический охват"):
+        organic_posts = values.get("Organic-публикации", "0")
+        try:
+            organic_tag = _pubs_word(int(re.sub(r"\D", "", organic_posts)))
+        except ValueError:
+            organic_tag = None
+        rows.append(CardRow("ОРГАНИЧЕСКИЙ ОХВАТ", values["Органический охват"], organic_tag))
+    rows.extend(CardRow(name, reach, tag) for name, reach, tag in highlights[:2])
+
+    return CardData(
+        kicker="ИТОГИ ПОСЕВА",
+        title_lines=_split_title(project_name),
+        hero=values["Общий охват"],
+        subtitle=f"просмотров · {_pubs_word(total_posts)}",
+        rows=rows,
+        footer="Отчёт по проекту · охват фактический на момент выгрузки",
+        breakdown_label="КЛЮЧЕВЫЕ ПОКАЗАТЕЛИ",
+        reach_label="РЕЗУЛЬТАТ",
+    )
+
+
+def _music_cover_fallback(text: str) -> YandexMusicCoverData:
+    lines = [line.strip("•- ") for line in text.splitlines() if line.strip()]
+    title = lines[0] if lines else "Яндекс Музыка"
+    subtitle = lines[1] if len(lines) > 1 else ""
+    subtitle = re.sub(r"(?i)\b(син(?:ий|его)|розов(?:ый|ого)|зелён(?:ый|ого))\s+фон\b", "", subtitle)
+    subtitle = re.sub(r"(?i)\b(слева|по центру)\b", "", subtitle)
+    subtitle = subtitle.strip(" ·,;-")
+    return YandexMusicCoverData(
+        title_lines=_split_title(title, max_len=14),
+        subtitle=subtitle[:80],
+        background="green" if "зелён" in text.lower() else "pink" if "розов" in text.lower() else "blue",
+        align="left" if "слева" in text.lower() else "center",
+    )
+
+
+def _music_cover_from_legacy_picture_block(text: str) -> Optional[YandexMusicCoverData]:
+    total_match = re.search(
+        r"^Итог:\s*([\d\s]+)\s+просмотров\s*·\s*(\d+)\s+публикац",
+        text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    if not total_match:
+        return None
+
+    project_match = re.search(r"^Проект:\s*(.*?)(?=\s*Фон:|\n|$)", text, flags=re.IGNORECASE | re.MULTILINE)
+    project = project_match.group(1).strip() if project_match else "Итоги посева"
+    lowered = text.lower()
+    background = "green" if "зелён" in lowered else "pink" if "розов" in lowered else "blue"
+    channel_rows: list[tuple[str, int]] = []
+    for name, reach in re.findall(
+        r"^•\s*(.+?)\s+—\s+\d+\s+публикац[^,]*,\s*([\d\s]+)\s*$",
+        text,
+        flags=re.MULTILINE | re.IGNORECASE,
+    ):
+        if not name.casefold().startswith("другие площадки"):
+            channel_rows.append((name.strip(), int(re.sub(r"\D", "", reach))))
+    channel_rows.sort(key=lambda row: row[1], reverse=True)
+
+    metrics = [YandexMusicMetric("ПУБЛИКАЦИИ", total_match.group(2), "вышли в рамках посева")]
+    if channel_rows:
+        metrics.append(YandexMusicMetric("ТОП-ПУБЛИКАЦИЯ", _format_number(channel_rows[0][1]), channel_rows[0][0]))
+    if len(channel_rows) >= 3:
+        metrics.append(YandexMusicMetric(
+            "ТОП-3 ПЛОЩАДКИ",
+            _format_number(sum(row[1] for row in channel_rows[:3])),
+            "суммарный охват",
+        ))
+
+    return YandexMusicCoverData(
+        title_lines=_split_title(project, max_len=18),
+        subtitle="Итоги посева",
+        background=background,
+        align="left" if "слева" in lowered else "center",
+        hero=_format_number(int(re.sub(r"\D", "", total_match.group(1)))),
+        hero_label="просмотров",
+        metrics=metrics,
+        highlight=(
+            f"{channel_rows[0][0]} — {_format_number(channel_rows[0][1])} просмотров"
+            if channel_rows else ""
+        ),
+    )
+
+
+def _music_cover_from_preview_text(text: str) -> Optional[YandexMusicCoverData]:
+    """Recovers a Music infographic when a user pastes a prior text preview."""
+    hero_match = re.search(r"^Главное число:\s*([\d\s]+)\s+(.+)$", text, flags=re.IGNORECASE | re.MULTILINE)
+    metrics_match = re.search(r"^Показатели:\s*(.+)$", text, flags=re.IGNORECASE | re.MULTILINE)
+    if not hero_match or not metrics_match:
+        return None
+
+    project_match = re.search(
+        r"^(?:Шаблон:\s*Яндекс Музыка\s*\n)?\s*(?:Заголовок:\s*)?(.+?)(?=\s*Подзаголовок:)",
+        text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    project = project_match.group(1).strip(" /\n") if project_match else "Итоги посева"
+    subtitle_match = re.search(r"Подзаголовок:\s*(.+)$", text, flags=re.IGNORECASE | re.MULTILINE)
+    subtitle = subtitle_match.group(1).removeprefix("Подзаголовок:").strip() if subtitle_match else "Итоги посева"
+    background_match = re.search(r"Фон:\s*(синий|розовый|зелёный)", text, flags=re.IGNORECASE)
+    background = {
+        "синий": "blue", "розовый": "pink", "зелёный": "green",
+    }.get(background_match.group(1).lower(), "blue") if background_match else "blue"
+    align = "left" if re.search(r"Выравнивание:\s*слева", text, flags=re.IGNORECASE) else "center"
+
+    metrics = []
+    for item in metrics_match.group(1).split(";")[:3]:
+        label, separator, value = item.strip().partition("—")
+        if separator and label.strip() and value.strip():
+            metrics.append(YandexMusicMetric(label.strip(), value.strip(), ""))
+    if not metrics:
+        return None
+    highlight_match = re.search(r"^Хайлайт:\s*(.+)$", text, flags=re.IGNORECASE | re.MULTILINE)
+    return YandexMusicCoverData(
+        title_lines=_split_title(project, max_len=18),
+        subtitle=subtitle,
+        background=background,
+        align=align,
+        hero=_format_number(int(re.sub(r"\D", "", hero_match.group(1)))),
+        hero_label=hero_match.group(2).strip(),
+        metrics=metrics,
+        highlight=highlight_match.group(1).strip() if highlight_match else "",
+    )
+
+
+async def compose_music_cover_from_text(
+    text: str,
+    openai_client=None,
+    model: str = "gpt-4o-mini",
+) -> YandexMusicCoverData:
+    """Собирает обложку Яндекс Музыки полностью локально, без LLM."""
+    del openai_client, model
+    text = (text or "").strip()
+    campaign_card = _campaign_card_from_block(text)
+    if campaign_card is None:
+        return (
+            _music_cover_from_preview_text(text)
+            or _music_cover_from_legacy_picture_block(text)
+            or _music_cover_fallback(text)
+        )
+
+    metric_rows = [
+        row for row in campaign_card.rows
+        if row.name in {"PAID-ОХВАТ", "ПЕРЕВЫПОЛНЕНИЕ", "ОРГАНИЧЕСКИЙ ОХВАТ"}
+    ]
+    highlight_row = next((row for row in campaign_card.rows if row not in metric_rows), None)
+    return YandexMusicCoverData(
+        title_lines=campaign_card.title_lines,
+        subtitle="Итоги посева",
+        hero=campaign_card.hero,
+        hero_label=campaign_card.subtitle,
+        metrics=[YandexMusicMetric(row.name, row.reach, row.tag or "") for row in metric_rows],
+        highlight=(
+            f"{highlight_row.name} — {highlight_row.reach} {highlight_row.tag or ''}".strip()
+            if highlight_row else ""
+        ),
+    )
+
+
+def revise_music_cover_from_text(current: YandexMusicCoverData, edits_text: str) -> YandexMusicCoverData:
+    """Применяет предсказуемые правки фона, выравнивания и подписей обложки."""
+    text = (edits_text or "").strip()
+    lowered = text.lower()
+    background = (
+        "green" if "зелён" in lowered
+        else "pink" if "розов" in lowered
+        else "blue" if "син" in lowered
+        else current.background
+    )
+    align = (
+        "left" if "слева" in lowered
+        else "center" if "по центру" in lowered
+        else current.align
+    )
+    title_match = re.search(r"заголовок\s*:\s*(.+)", text, flags=re.IGNORECASE)
+    subtitle_match = re.search(r"подзаголовок\s*:\s*(.+)", text, flags=re.IGNORECASE)
+    title_lines = (
+        [line.strip() for line in title_match.group(1).split("/") if line.strip()][:3]
+        if title_match else current.title_lines
+    )
+    subtitle = subtitle_match.group(1).strip()[:80] if subtitle_match else current.subtitle
+    return YandexMusicCoverData(
+        title_lines=title_lines,
+        subtitle=subtitle,
+        background=background,
+        align=align,
+        hero=current.hero,
+        hero_label=current.hero_label,
+        metrics=current.metrics,
+        highlight=current.highlight,
+    )
+
+
+def format_music_cover_preview(cover: YandexMusicCoverData) -> str:
+    background_names = {"blue": "синий", "pink": "розовый", "green": "зелёный"}
+    return (
+        f"Шаблон: Яндекс Музыка\n"
+        f"Заголовок: {' / '.join(cover.title_lines)}\n"
+        f"Подзаголовок: {cover.subtitle or 'нет'}\n"
+        f"Фон: {background_names.get(cover.background, cover.background)}\n"
+        f"Выравнивание: {'слева' if cover.align == 'left' else 'по центру'}"
+        + (f"\nГлавное число: {cover.hero} {cover.hero_label}" if cover.hero else "")
+        + (
+            "\nПоказатели: "
+            + "; ".join(f"{metric.name} — {metric.value}" for metric in cover.metrics)
+            if cover.metrics else ""
+        )
+        + (f"\nХайлайт: {cover.highlight}" if cover.highlight else "")
+    )
 
 
 # --- Правки существующей карточки через ИИ --------------------------------
@@ -657,6 +925,10 @@ async def revise_card_from_text(
             subtitle=str(parsed.get("subtitle", "") or ""),
             rows=rows,
             footer=str(parsed.get("footer", "") or ""),
+            breakdown_label=str(
+                parsed.get("breakdown_label", "") or current.breakdown_label or "РАЗБИВКА ПО ПЛОЩАДКАМ"
+            ),
+            reach_label=str(parsed.get("reach_label", "") or current.reach_label or "ОХВАТ"),
         )
     except Exception as e:
         logger.warning(f"revise_card_from_text: bad JSON structure: {e}")
