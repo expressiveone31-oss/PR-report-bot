@@ -135,7 +135,7 @@ def build_music_cover_svg(data: YandexMusicCoverData) -> str:
                 f'<line x1="{MARGIN}" y1="830" x2="{W - MARGIN}" y2="830" '
                 f'stroke="{YELLOW}" stroke-opacity="0.55" stroke-width="2"/>'
                 f'<text x="{MARGIN}" y="865" font-family="{FONT_BODY}" font-weight="700" font-size="21" '
-                f'fill="{YELLOW}">ХАЙЛАЙТ ПОСЕВА</text>'
+                f'fill="{YELLOW}">САМАЯ ОХВАТНАЯ</text>'
                 f'<text x="{MARGIN}" y="915" font-family="{FONT_BODY}" font-weight="500" font-size="26" '
                 f'fill="#FFFFFF">{_escape(data.highlight)}</text>'
             )
