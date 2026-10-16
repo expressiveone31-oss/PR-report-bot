@@ -25,6 +25,13 @@ logger = logging.getLogger(__name__)
 
 CAMPAIGN_CARD_HEADER = "ДАННЫЕ ДЛЯ КАРТОЧКИ: ИТОГИ ПОСЕВА"
 
+# Фасад карточки (и Кинопоиск, и Яндекс Музыка) — всегда эти блоки:
+# 1) Итоги посева — суммарные просмотры (hero)
+# 2) Органика — число постов + просмотры
+# 3) Выполнение paid-плана — %
+# 4) Итоговый CPV
+# 5) Самая охватная публикация — канал + просмотры
+
 
 # --- Форматирование чисел --------------------------------------------------
 
@@ -34,6 +41,22 @@ def _format_number(n: Optional[int]) -> str:
     if n is None:
         return "0"
     return f"{int(n):,}".replace(",", " ")
+
+
+def _format_pct(value: float) -> str:
+    """150.0 → '150%'."""
+    if value is None:
+        return ""
+    if abs(value - round(value)) < 0.05:
+        return f"{int(round(value))}%"
+    return f"{value:.1f}".replace(".", ",") + "%"
+
+
+def _format_cpv(value: float) -> str:
+    """0.47 → '0,47 ₽'."""
+    if value is None or value <= 0:
+        return ""
+    return f"{value:.2f}".replace(".", ",") + " ₽"
 
 
 def _plural(n: int, one: str, few: str, many: str) -> str:
@@ -49,6 +72,72 @@ def _plural(n: int, one: str, few: str, many: str) -> str:
 def _pubs_word(n: int) -> str:
     """Возвращает '14 публикаций' с правильным падежом."""
     return f"{n} {_plural(n, 'публикация', 'публикации', 'публикаций')}"
+
+
+def _post_views(post: dict) -> int:
+    stats = post.get("stats") or {}
+    views = stats.get("views")
+    if views is None:
+        views = post.get("views")
+    try:
+        return int(views or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _post_channel_label(post: dict) -> str:
+    name = str(post.get("name") or "").strip()
+    if name and not name.startswith(("http://", "https://")):
+        return name
+    platform = post.get("platform") or "unknown"
+    return PLATFORM_NAMES.get(platform, platform.capitalize())
+
+
+def _find_top_post(posts_data: list[dict]) -> Optional[tuple[str, int]]:
+    """Самая охватная публикация: (канал, просмотры)."""
+    best_name = ""
+    best_views = 0
+    for post in posts_data or []:
+        views = _post_views(post)
+        if views > best_views:
+            best_views = views
+            best_name = _post_channel_label(post)
+    if best_views <= 0:
+        return None
+    return best_name, best_views
+
+
+def compute_facade_metrics(
+    posts_data: list[dict],
+    total_reach: int = 0,
+    placement_budget: float = 0.0,
+    planned_reach: int = 0,
+) -> dict:
+    """
+    Считает единый набор показателей для фасада карточки.
+    Совпадает по смыслу с report_v2.calculate_metrics (actual_cpv = budget / total).
+    """
+    posts = posts_data or []
+    paid = [p for p in posts if not p.get("is_organic")]
+    organic = [p for p in posts if p.get("is_organic")]
+    paid_actual = sum(_post_views(p) for p in paid)
+    organic_actual = sum(_post_views(p) for p in organic)
+    total_actual = total_reach or (paid_actual + organic_actual)
+    paid_plan = int(planned_reach or sum(int(p.get("planned_reach") or 0) for p in paid))
+    completion_pct = (paid_actual / paid_plan * 100) if paid_plan else 0.0
+    actual_cpv = (placement_budget / total_actual) if placement_budget and total_actual else 0.0
+    top = _find_top_post(posts)
+    return {
+        "total_actual": int(total_actual),
+        "organic_actual": int(organic_actual),
+        "organic_posts": len(organic),
+        "paid_actual": int(paid_actual),
+        "paid_plan": int(paid_plan),
+        "paid_completion_pct": float(completion_pct),
+        "actual_cpv": float(actual_cpv),
+        "top_channel": top[0] if top else "",
+        "top_views": top[1] if top else 0,
+    }
 
 
 # --- Агрегация по площадкам ------------------------------------------------
@@ -405,14 +494,15 @@ FREETEXT_SYSTEM_PROMPT = """Ты — редактор карточки для б
 6. Footer — короткая техническая строка. Пример: «Отчёт по проекту · охват
    фактический на момент выгрузки».
 
-ЕСЛИ В ТЕКСТЕ ЕСТЬ ИТОГИ КАМПАНИИ, а не разбивка по каналам:
-- hero — общий охват;
-- rows — paid-охват с планом, перевыполнение paid-плана, органический охват;
-- органический охват показывай только если он указан;
-- хайлайты добавляй только если они явно перечислены, максимум два;
-- не заменяй итоговые показатели топом каналов или публикаций.
-- для такой карточки используй breakdown_label «КЛЮЧЕВЫЕ ПОКАЗАТЕЛИ» и
-  reach_label «РЕЗУЛЬТАТ».
+ЕСЛИ В ТЕКСТЕ ЕСТЬ ИТОГИ КАМПАНИИ / ФАСАДНЫЕ ПОКАЗАТЕЛИ:
+На фасад ВСЕГДА выноси в таком порядке (пропускай только то, чего нет в тексте):
+1) hero — суммарные просмотры («Итоги посева»);
+2) row «ОРГАНИКА» — органические просмотры, в tag — число публикаций;
+3) row «PAID-ПЛАН» — выполнение paid-плана в процентах;
+4) row «CPV» — итоговый CPV;
+5) row с highlight=true — самая охватная публикация (канал + охват).
+Не подменяй этот фасад топом площадок. Используй breakdown_label
+«КЛЮЧЕВЫЕ ПОКАЗАТЕЛИ» и reach_label «РЕЗУЛЬТАТ».
 
 ПРАВИЛА ФОРМАТА:
 - Числа в reach и hero — с пробелами через каждые 3 цифры: «142 327», «1 200 000».
@@ -537,61 +627,110 @@ def _fix_publications_plural(tag: str) -> str:
     return _pubs_word(n) + m.group(2)
 
 
-def _campaign_card_from_block(text: str) -> Optional[CardData]:
+def _parse_campaign_values(text: str) -> Optional[dict[str, str]]:
+    """Разбирает блок CAMPAIGN_CARD_HEADER в словарь полей."""
     if not text.startswith(CAMPAIGN_CARD_HEADER):
         return None
-
     values: dict[str, str] = {}
-    highlights: list[tuple[str, str, str]] = []
     for line in text.splitlines()[1:]:
         key, separator, value = line.partition(":")
         if not separator:
             continue
+        key = key.strip()
         value = value.strip()
         if key == "Хайлайт":
+            # Старый формат: «канал | охват | подпись»
             parts = [part.strip() for part in value.split("|")]
-            if len(parts) == 3:
-                highlights.append((parts[0], parts[1], parts[2]))
+            if len(parts) >= 2 and not values.get("Топ-публикация"):
+                values["Топ-публикация"] = parts[0]
+                values["Топ-охват"] = parts[1]
+            continue
+        # Совместимость со старым ключом «Перевыполнение paid-плана»
+        if key == "Перевыполнение paid-плана" and "Выполнение paid-плана" not in values:
+            values["Выполнение paid-плана"] = value
             continue
         values[key] = value
+    if not values.get("Общий охват"):
+        return None
+    return values
 
-    required = ("Общий охват", "Публикации", "Paid-охват", "Paid-план")
-    if any(not values.get(key) for key in required):
+
+def _campaign_card_from_block(text: str) -> Optional[CardData]:
+    """Кинопоиск-карточка с единым фасадом ключевых показателей."""
+    values = _parse_campaign_values(text)
+    if values is None:
         return None
 
     project_name = values.get("Проект", "Без названия")
-    try:
-        total_posts = int(re.sub(r"\D", "", values["Публикации"]))
-    except ValueError:
-        return None
+    rows: list[CardRow] = []
 
-    rows = [
-        CardRow("PAID-ОХВАТ", values["Paid-охват"], f"план {values['Paid-план']}", True),
-    ]
-    if values.get("Перевыполнение paid-плана"):
-        rows.append(CardRow(
-            "ПЕРЕВЫПОЛНЕНИЕ",
-            values["Перевыполнение paid-плана"],
-            "paid-плана",
-        ))
     if values.get("Органический охват"):
-        organic_posts = values.get("Organic-публикации", "0")
+        organic_posts_raw = values.get("Organic-публикации", "")
         try:
-            organic_tag = _pubs_word(int(re.sub(r"\D", "", organic_posts)))
+            organic_tag = _pubs_word(int(re.sub(r"\D", "", organic_posts_raw))) if organic_posts_raw else None
         except ValueError:
             organic_tag = None
-        rows.append(CardRow("ОРГАНИЧЕСКИЙ ОХВАТ", values["Органический охват"], organic_tag))
-    rows.extend(CardRow(name, reach, tag) for name, reach, tag in highlights[:2])
+        rows.append(CardRow("ОРГАНИКА", values["Органический охват"], organic_tag))
+
+    paid_pct = values.get("Выполнение paid-плана") or ""
+    if paid_pct:
+        rows.append(CardRow("PAID-ПЛАН", paid_pct, "выполнение"))
+
+    if values.get("CPV"):
+        rows.append(CardRow("CPV", values["CPV"], "итоговый"))
+
+    top_name = values.get("Топ-публикация", "")
+    top_reach = values.get("Топ-охват", "")
+    if top_name and top_reach:
+        rows.append(CardRow(top_name, top_reach, "самая охватная", True))
+    elif rows:
+        rows[0].highlight = True
 
     return CardData(
         kicker="ИТОГИ ПОСЕВА",
         title_lines=_split_title(project_name),
         hero=values["Общий охват"],
-        subtitle=f"просмотров · {_pubs_word(total_posts)}",
+        subtitle="просмотров",
         rows=rows,
         footer="Отчёт по проекту · охват фактический на момент выгрузки",
         breakdown_label="КЛЮЧЕВЫЕ ПОКАЗАТЕЛИ",
         reach_label="РЕЗУЛЬТАТ",
+    )
+
+
+def _music_cover_from_campaign_values(values: dict[str, str]) -> YandexMusicCoverData:
+    """Яндекс Музыка: тот же фасад, уложенный в hero + 3 метрики + хайлайт."""
+    project_name = values.get("Проект", "Без названия")
+    metrics: list[YandexMusicMetric] = []
+
+    if values.get("Органический охват"):
+        organic_posts_raw = values.get("Organic-публикации", "")
+        try:
+            detail = _pubs_word(int(re.sub(r"\D", "", organic_posts_raw))) if organic_posts_raw else ""
+        except ValueError:
+            detail = ""
+        metrics.append(YandexMusicMetric("ОРГАНИКА", values["Органический охват"], detail))
+
+    paid_pct = values.get("Выполнение paid-плана") or ""
+    if paid_pct:
+        metrics.append(YandexMusicMetric("PAID-ПЛАН", paid_pct, "выполнение"))
+
+    if values.get("CPV"):
+        metrics.append(YandexMusicMetric("CPV", values["CPV"], "итоговый"))
+
+    top_name = values.get("Топ-публикация", "")
+    top_reach = values.get("Топ-охват", "")
+    highlight = ""
+    if top_name and top_reach:
+        highlight = f"{top_name} — {top_reach}"
+
+    return YandexMusicCoverData(
+        title_lines=_split_title(project_name, max_len=18),
+        subtitle="Итоги посева",
+        hero=values["Общий охват"],
+        hero_label="просмотров",
+        metrics=metrics[:3],
+        highlight=highlight,
     )
 
 
@@ -707,29 +846,14 @@ async def compose_music_cover_from_text(
     """Собирает обложку Яндекс Музыки полностью локально, без LLM."""
     del openai_client, model
     text = (text or "").strip()
-    campaign_card = _campaign_card_from_block(text)
-    if campaign_card is None:
-        return (
-            _music_cover_from_preview_text(text)
-            or _music_cover_from_legacy_picture_block(text)
-            or _music_cover_fallback(text)
-        )
+    values = _parse_campaign_values(text)
+    if values is not None:
+        return _music_cover_from_campaign_values(values)
 
-    metric_rows = [
-        row for row in campaign_card.rows
-        if row.name in {"PAID-ОХВАТ", "ПЕРЕВЫПОЛНЕНИЕ", "ОРГАНИЧЕСКИЙ ОХВАТ"}
-    ]
-    highlight_row = next((row for row in campaign_card.rows if row not in metric_rows), None)
-    return YandexMusicCoverData(
-        title_lines=campaign_card.title_lines,
-        subtitle="Итоги посева",
-        hero=campaign_card.hero,
-        hero_label=campaign_card.subtitle,
-        metrics=[YandexMusicMetric(row.name, row.reach, row.tag or "") for row in metric_rows],
-        highlight=(
-            f"{highlight_row.name} — {highlight_row.reach} {highlight_row.tag or ''}".strip()
-            if highlight_row else ""
-        ),
+    return (
+        _music_cover_from_preview_text(text)
+        or _music_cover_from_legacy_picture_block(text)
+        or _music_cover_fallback(text)
     )
 
 
@@ -939,35 +1063,39 @@ def build_picture_data_block(
     project_name: str,
     posts_data: list[dict],
     total_reach: int,
+    placement_budget: float = 0.0,
+    planned_reach: int = 0,
 ) -> str:
     """
-    Формирует компактный текстовый блок с данными для команды /picture.
-    Пользователь копирует этот блок и отправляет в /picture — получает карточку.
-
-    Формат специально нейтрально-читабельный: одинаково удобен и человеку,
-    и ИИ-парсеру внутри compose_card_from_text.
+    Формирует блок фасадных данных для /picture.
+    Пользователь копирует блок → /picture → Кинопоиск или Яндекс Музыка.
     """
-    lines: list[str] = []
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("Данные для карточки (/picture)")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    if project_name:
-        lines.append(f"Проект: {project_name}")
+    facade = compute_facade_metrics(
+        posts_data,
+        total_reach=total_reach,
+        placement_budget=placement_budget,
+        planned_reach=planned_reach,
+    )
+    lines: list[str] = [
+        CAMPAIGN_CARD_HEADER,
+        f"Проект: {project_name or 'Без названия'}",
+        f"Общий охват: {_format_number(facade['total_actual'])}",
+    ]
+    if facade["organic_actual"] or facade["organic_posts"]:
+        lines.append(f"Органический охват: {_format_number(facade['organic_actual'])}")
+        lines.append(f"Organic-публикации: {facade['organic_posts']}")
+    if facade["paid_plan"]:
+        lines.append(f"Paid-охват: {_format_number(facade['paid_actual'])}")
+        lines.append(f"Paid-план: {_format_number(facade['paid_plan'])}")
+        lines.append(f"Выполнение paid-плана: {_format_pct(facade['paid_completion_pct'])}")
+    if facade["actual_cpv"]:
+        lines.append(f"CPV: {_format_cpv(facade['actual_cpv'])}")
+    if facade["top_channel"] and facade["top_views"]:
+        lines.append(f"Топ-публикация: {facade['top_channel']}")
+        lines.append(f"Топ-охват: {_format_number(facade['top_views'])}")
 
-    total_posts = len([p for p in posts_data if p])
-    lines.append(f"Итог: {_format_number(total_reach)} просмотров · {_pubs_word(total_posts)}")
     lines.append("")
-
-    agg = _aggregate_by_channel(posts_data)
-    if agg:
-        lines.append("По каналам:")
-        for row in agg:
-            lines.append(
-                f"• {row['name']} — {_pubs_word(row['count'])}, {_format_number(row['reach'])}"
-            )
-
-    lines.append("")
-    lines.append("Скопируй сообщение → отправь в /picture → получишь карточку.")
+    lines.append("Скопируй сообщение → /picture → выбери шаблон → получишь карточку.")
     return "\n".join(lines)
 
 
