@@ -768,7 +768,13 @@ async def got_csv_mediaplan(message: Message, state: FSMContext) -> None:
     # Дополнительный блок: готовые данные для команды /picture
     try:
         from src.card import build_picture_data_block
-        block = build_picture_data_block(project_name, posts_data, total_actual)
+        block = build_picture_data_block(
+            project_name,
+            posts_data,
+            total_actual,
+            placement_budget=total_budget,
+            planned_reach=total_plan,
+        )
         await message.answer(block, parse_mode=None)
     except Exception as e:
         # Блок для карточки — не критичная фича, отчёт уже отправлен
@@ -1423,7 +1429,13 @@ async def got_project_name(message: Message, state: FSMContext) -> None:
         posts_data = getattr(breakdown, "posts_data", []) or []
         if posts_data:
             from src.card import build_picture_data_block
-            block = build_picture_data_block(project_name, posts_data, total_actual)
+            block = build_picture_data_block(
+                project_name,
+                posts_data,
+                total_actual,
+                placement_budget=float(budget or 0),
+                planned_reach=int(planned_reach or 0),
+            )
             await message.answer(block, parse_mode=None)
     except Exception as e:
         logger.warning(f"Failed to build picture data block: {e}", exc_info=True)
