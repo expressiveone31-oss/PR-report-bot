@@ -25,7 +25,9 @@ SYSTEM_PROMPT = """Ты превращаешь внутренний отчёт �
    очевидные опечатки и лишние пробелы.
 2. Отдельным абзацем: плановый paid-охват, фактический paid-охват и перевыполнение
    плана. При 178% выполнения пиши «превысили план на 78%», а не «на 178%».
-3. Укажи 1–3 самых сильных paid-результата с названиями, ссылками, фактом и планом.
+3. Добавь блок с заголовком ровно «Лучше всего отработали каналы:». Под ним укажи
+   1–3 самых сильных paid-результата с названиями, ссылками, фактом и планом.
+   Не используй заголовок «Сильные paid-результаты:».
 4. Добавь одну деталь вовлечённости только если в отчёте есть точное сравнение с
    обычными показателями канала. Иначе пропусти этот абзац.
 5. Укажи фактический CPV и плановый CPV, если оба есть.
@@ -94,12 +96,8 @@ def _fallback_external_post(report: str, project_description: str) -> str:
         if "при плане" in line.casefold()
     ][:3]
     if strong_results:
-        first_name, separator, first_result = strong_results[0].partition(" — ")
-        if separator:
-            lines.extend(["", f"Больше всего просмотров принесла публикация у {first_name}: {first_result}."])
-        if len(strong_results) > 1:
-            lines.extend(["", "Также выше плана отработали:"])
-            lines.extend(f"• {line}" for line in strong_results[1:])
+        lines.extend(["", "Лучше всего отработали каналы:"])
+        lines.extend(f"• {line}" for line in strong_results)
 
     if actual_cpv:
         cpv_line = f"Фактический CPV: {actual_cpv}"
@@ -148,6 +146,7 @@ async def generate_external_post(internal_report: str, project_description: str 
         logger.warning("External post generation failed, using deterministic fallback: %s", exc)
         return _fallback_external_post(internal_report, project_description)
     result = (response.choices[0].message.content or "").strip()
+    result = result.replace("Сильные paid-результаты:", "Лучше всего отработали каналы:")
     if not result:
         raise ValueError("OpenAI вернул пустой пост")
 
