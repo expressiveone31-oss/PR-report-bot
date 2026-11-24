@@ -56,6 +56,13 @@ class ExternalAnalyzerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(create.await_count, 1)
 
     @patch("src.analyzer.external_analyzer.client.chat.completions.create", new_callable=AsyncMock)
+    async def test_renames_old_paid_results_heading(self, create):
+        create.return_value = response("Вступление\n\nСильные paid-результаты:\n• Канал — 10 при плане 5")
+        result = await generate_external_post("Внутренний отчёт с фактами")
+        self.assertIn("Лучше всего отработали каналы:", result)
+        self.assertNotIn("Сильные paid-результаты:", result)
+
+    @patch("src.analyzer.external_analyzer.client.chat.completions.create", new_callable=AsyncMock)
     async def test_uses_fact_based_fallback_when_openai_is_unavailable(self, create):
         create.side_effect = ConnectionError("Connection error")
         report = """Проект: Тест
@@ -84,7 +91,9 @@ class ExternalAnalyzerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.startswith("Продвигали аниме в развлекательных каналах."))
         self.assertIn("Вместо 100 просмотров получили 150.", result)
         self.assertIn("Превысили план на 50%.", result)
-        self.assertIn("Больше всего просмотров принесла публикация у [Paid](https://example.com/paid)", result)
+        self.assertIn("Лучше всего отработали каналы:", result)
+        self.assertIn("• [Paid](https://example.com/paid) — 150 просмотров при плане 100 (1,5× плана)", result)
+        self.assertNotIn("Сильные paid-результаты:", result)
         self.assertIn("Все вышедшие публикации:\n• [Paid](https://example.com/paid)", result)
         self.assertIn("Органические публикации:\n• [Organic](https://example.com/organic)", result)
 
